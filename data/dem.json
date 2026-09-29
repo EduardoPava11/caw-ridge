@@ -1,0 +1,11 @@
+{
+  "crs": "EPSG:3979 NAD83(CSRS) / Canada Atlas Lambert",
+  "encoding": "metres = value / 10 - 100, 0 = no data",
+  "h": 2516,
+  "res": 30.0,
+  "source": "Natural Resources Canada, MRDEM-30 digital terrain model",
+  "vertical": "CGVD2013, metres",
+  "w": 2576,
+  "x0": -1572270.0,
+  "y0": 892470.0
+}

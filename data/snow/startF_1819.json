@@ -1,0 +1,10 @@
+{
+  "crs": "EPSG:3979 NAD83(CSRS) / Canada Atlas Lambert",
+  "encoding": "value = pixel / 10 - 100, 0 = no data",
+  "h": 983,
+  "res": 30.0,
+  "source": "Natural Resources Canada, annual 30 m snow dynamics; days relative to 31 December of the first year of the winter",
+  "w": 1050,
+  "x0": -1548030.0,
+  "y0": 870750.0
+}

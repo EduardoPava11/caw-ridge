@@ -1,0 +1,22 @@
+[package]
+name = "cawridge"
+version = "0.1.0"
+edition = "2021"
+description = "Static site generator for the Caw Ridge trip: reads open elevation data, renders the maps, writes the site."
+license = "MIT"
+
+[dependencies]
+ureq = "3"
+weezl = "0.1"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde_json = "1"
+resvg = "0.45"
+rayon = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.dev]
+opt-level = 2
+
+[profile.release]
+opt-level = 3

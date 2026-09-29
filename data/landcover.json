@@ -1,0 +1,10 @@
+{
+  "crs": "EPSG:3979 NAD83(CSRS) / Canada Atlas Lambert",
+  "encoding": "value = pixel / 10 - 100, 0 = no data",
+  "h": 2450,
+  "res": 30.0,
+  "source": "Natural Resources Canada, 2020 Land Cover of Canada, class codes of the North American Land Change Monitoring System",
+  "w": 2509,
+  "x0": -1571250.0,
+  "y0": 891480.0
+}
