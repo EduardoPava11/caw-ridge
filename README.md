@@ -1,10 +1,15 @@
 # Caw Ridge
 
-A hunter's field guide to Caw Ridge, Alberta (54.062707, -119.390728), as a static
-website. One Rust program downloads open data, analyses the terrain, draws every map
-and writes every page.
+A hunter's field guide to Caw Ridge, Alberta, as a static website. One Rust program
+downloads open data, analyses the terrain, draws every map and writes every page.
 
-The site is in `docs/` and is served by GitHub Pages.
+The guide is built around two points. The **waypoint** (54.095806, -119.324028) is
+the place to get to: the turnoff on Beaverdam Road where the old exploration road
+leaves the gravel, at 1,285 m in the timber. The **ridge point** (54.062707,
+-119.390728) is 8 km up that road, at 1,991 m in the alpine.
+
+The site is published at https://eduardopava11.github.io/caw-ridge/ from the
+`gh-pages` branch. The built site is not kept on `main`.
 
 ## What is in it
 
@@ -37,18 +42,28 @@ cargo run --release -- pages   # rewrite the pages only, keeping the maps
 cargo test --release           # projections, sun, calendar, magnetic model
 ```
 
-A full build takes about a minute. To look at the result:
+A full build takes about a minute and a quarter and writes into `docs/`. To look at
+the result:
 
 ```sh
 cd docs && python3 -m http.server 8000
 ```
 
+To build and publish in one step:
+
+```sh
+./deploy.sh          # fetch fresh data, build, publish
+./deploy.sh build    # build from the data already on disk, publish
+```
+
 ## Point it somewhere else
 
-Everything about the place is in `src/config.rs`: the waypoint, the three map boxes,
-the date for the sun maps. Change them, run `cargo run --release`, and the maps and
+Everything about the place is in `src/config.rs`: the waypoint, the ridge point, the
+three map boxes, the date for the sun maps. Change them, run `cargo run --release`, and the maps and
 the numbers on the pages follow. The prose about regulations, wildlife and access in
-`src/site.rs` is specific to Caw Ridge and would need rewriting by hand.
+`src/site.rs` is specific to Caw Ridge and WMU 446 and would need rewriting by hand.
+The build stops with an error if the waypoint falls outside WMU 446, rather than
+print the wrong rules.
 
 ## How it works
 

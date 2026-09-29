@@ -1,9 +1,14 @@
 //! The one place where the trip is described. Change the waypoint or the boxes here and
 //! every map, table and page follows.
 
-/// The waypoint the whole site is built around.
-pub const WPT_LAT: f64 = 54.062707;
-pub const WPT_LON: f64 = -119.390728;
+/// The waypoint the whole site is built around: the place to get to.
+/// 54 05 44.9 N, 119 19 26.5 W, where the old road to the ridge leaves the gravel.
+pub const WPT_LAT: f64 = 54.095806;
+pub const WPT_LON: f64 = -119.324028;
+
+/// The first point the guide was built on, high on the ridge. It stays on every map.
+pub const RIDGE_LAT: f64 = 54.062707;
+pub const RIDGE_LON: f64 = -119.390728;
 
 /// A lon/lat box: west, south, east, north.
 #[derive(Clone, Copy, Debug)]
@@ -27,8 +32,9 @@ pub const REGION: BBox = BBox { w: -119.85, s: 53.80, e: -118.95, n: 54.30 };
 /// The ridge and the roads that reach it.
 pub const RIDGE: BBox = BBox { w: -119.58, s: 53.97, e: -119.20, n: 54.16 };
 
-/// The ground within a morning's walk of the waypoint.
-pub const CLOSE: BBox = BBox { w: -119.47, s: 54.02, e: -119.31, n: 54.105 };
+/// The hunting ground: the waypoint in the valley, the ridge above it, and the climb
+/// between them, on one sheet.
+pub const CLOSE: BBox = BBox { w: -119.47, s: 54.02, e: -119.244, n: 54.1383 };
 
 pub const MRDEM_DTM: &str =
     "https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif";

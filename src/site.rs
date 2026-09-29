@@ -64,10 +64,11 @@ fn layout(p: &Page, built: &str) -> String {
     };
     let v: String = built.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let page = format!(
-        "<!doctype html>\n<html lang=\"en-CA\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n<meta name=\"theme-color\" content=\"#1d1d1b\">\n<link rel=\"manifest\" href=\"manifest.webmanifest\">\n<link rel=\"icon\" href=\"assets/icon.svg\" type=\"image/svg+xml\">\n<link rel=\"apple-touch-icon\" href=\"assets/icon-180.png\">\n<link rel=\"preload\" href=\"assets/fonts/BarlowCondensed-Bold.woff2\" as=\"font\" type=\"font/woff2\" crossorigin>\n<link rel=\"stylesheet\" href=\"assets/style.css\">\n{}\n<script>try{{var t=localStorage.getItem('cawridge-theme');if(t)document.documentElement.setAttribute('data-theme',t)}}catch(e){{}}</script>\n</head>\n<body>\n<header class=\"mast\"><div class=\"wrap\"><a class=\"brand\" href=\"index.html\"><b>Caw Ridge</b><span>54.0627 N 119.3907 W</span></a><nav aria-label=\"Sections\">{}</nav><button class=\"theme\" type=\"button\">Night</button></div></header>\n{}\n{}\n<script src=\"assets/app.js\" defer></script>\n{}\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en-CA\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n<meta name=\"theme-color\" content=\"#1d1d1b\">\n<link rel=\"manifest\" href=\"manifest.webmanifest\">\n<link rel=\"icon\" href=\"assets/icon.svg\" type=\"image/svg+xml\">\n<link rel=\"apple-touch-icon\" href=\"assets/icon-180.png\">\n<link rel=\"preload\" href=\"assets/fonts/BarlowCondensed-Bold.woff2\" as=\"font\" type=\"font/woff2\" crossorigin>\n<link rel=\"stylesheet\" href=\"assets/style.css\">\n{}\n<script>try{{var t=localStorage.getItem('cawridge-theme');if(t)document.documentElement.setAttribute('data-theme',t)}}catch(e){{}}</script>\n</head>\n<body>\n<header class=\"mast\"><div class=\"wrap\"><a class=\"brand\" href=\"index.html\"><b>Caw Ridge</b><span>{}</span></a><nav aria-label=\"Sections\">{}</nav><button class=\"theme\" type=\"button\">Night</button></div></header>\n{}\n{}\n<script src=\"assets/app.js\" defer></script>\n{}\n</body>\n</html>\n",
         esc(&title),
         esc(p.description),
         p.head,
+        format!("{:.4} N {:.4} W", config::WPT_LAT, config::WPT_LON.abs()),
         nav,
         p.body,
         footer,
@@ -123,9 +124,18 @@ pub fn places(world: &World, p: &Products) -> Vec<Place> {
         lon: config::WPT_LON,
         lat: config::WPT_LAT,
         elev: world.wpt_elev,
-        note: "The point this guide is built around. It sits in a high bowl with a short view.".into(),
+        note: "Where you need to get to: the Caw Ridge turnoff on Beaverdam Road, where the old road to the ridge leaves the gravel.".into(),
         short: "Waypoint".into(),
     }];
+    v.push(Place {
+        name: "Ridge point".into(),
+        kind: "ridge",
+        lon: config::RIDGE_LON,
+        lat: config::RIDGE_LAT,
+        elev: p.ridge_elev,
+        note: "The first point this guide was built on, high on the ridge in open alpine. It sits in a bowl with a short view.".into(),
+        short: "Ridge point".into(),
+    });
     for g in &p.vantages {
         v.push(Place {
             name: format!("{} glassing point", g.name),
@@ -216,7 +226,7 @@ pub fn sun_rows(from: i64, to: i64) -> Vec<SunRow> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &Path, built_days: i64, built: &str) -> Res<()> {
+pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, fc_ridge: &Forecast, out: &Path, built_days: i64, built: &str) -> Res<()> {
     std::fs::create_dir_all(out.join("assets/fonts"))?;
     std::fs::create_dir_all(out.join("data"))?;
     std::fs::create_dir_all(out.join("vendor/leaflet/images"))?;
@@ -310,35 +320,76 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     let leg_km = |k: &str| -> f64 { p.drive.iter().filter(|l| l.kind == k).map(|l| l.km).sum() };
     let (km_hwy, km_gravel, km_track) = (leg_km("highway") + leg_km("town"), leg_km("gravel"), leg_km("track"));
     let km_total = km_hwy + km_gravel + km_track;
+    // The way on from the waypoint to the ridge.
+    let km_climb: f64 = p.climb.iter().map(|l| l.km).sum();
+    let km_walk = p.walk_profile.pts.last().map(|q| q.0).unwrap_or(0.0);
+    let climb_gain = p.climb_profile.pts.last().map(|q| q.1).unwrap_or(0.0) - p.climb_profile.pts.first().map(|q| q.1).unwrap_or(0.0);
+    let ridge_km = geo::haversine(config::WPT_LON, config::WPT_LAT, config::RIDGE_LON, config::RIDGE_LAT) / 1000.0;
+    let ridge_brg = geo::bearing(config::WPT_LON, config::WPT_LAT, config::RIDGE_LON, config::RIDGE_LAT);
+    let hours = |h: f32| -> String {
+        let m = (h * 60.0 / 5.0).round() as i64 * 5;
+        if m < 60 { format!("{m} minutes") } else if m % 60 == 0 { format!("{} hours", m / 60) } else { format!("{} h {:02} min", m / 60, m % 60) }
+    };
+    // When the first snow has come, from the winters whose date is known to a fortnight.
+    let snow_span = |pick: &dyn Fn(&crate::products::SnowRow) -> Option<(i64, f32)>| -> Option<(String, String)> {
+        let mut days: Vec<i64> = p
+            .snow
+            .iter()
+            .filter_map(|r| pick(r).filter(|f| f.1 <= 15.0).map(|f| {
+                // Fold every winter onto one calendar, as days after 31 August.
+                let (y, _, _) = sun::civil_from_days(f.0);
+                f.0 - sun::days_from_civil(y, 8, 31)
+            }))
+            .collect();
+        days.sort();
+        let base = sun::days_from_civil(2026, 8, 31);
+        Some((date_short(base + *days.first()?), date_short(base + *days.last()?)))
+    };
+    let snow_ridge = snow_span(&|r| r.ridge_first).unwrap_or_default();
+    let snow_wpt = snow_span(&|r| r.first).unwrap_or_default();
+    let forest_3km: f32 = p.stats.cover_3km.iter().filter(|c| c.0.contains("forest")).map(|c| c.1).sum();
+    let in_timber = !p.stats.wpt_open;
     let g1 = &p.vantages[0];
     let sat_date = &world.sat_ridge.date[..10];
 
-    // The forecast strip, as it stood at build time.
-    let mut strip = String::new();
-    for d in &fc.days {
-        let dd = sun::days_from_civil(d.date[..4].parse()?, d.date[5..7].parse()?, d.date[8..10].parse()?);
-        let wet = if d.snow >= 0.1 { format!("{:.1} cm snow", d.snow) } else if d.precip >= 0.1 { format!("{:.1} mm rain", d.precip) } else { "Dry".to_string() };
-        let _ = write!(
+    // The forecast strips, as they stood at build time.
+    let strip_for = |f: &Forecast, lat: f64, lon: f64| -> Res<String> {
+        let mut strip = String::new();
+        for d in &f.days {
+            let dd = sun::days_from_civil(d.date[..4].parse()?, d.date[5..7].parse()?, d.date[8..10].parse()?);
+            let wet = if d.snow >= 0.1 { format!("{:.1} cm snow", d.snow) } else if d.precip >= 0.1 { format!("{:.1} mm rain", d.precip) } else { "Dry".to_string() };
+            let _ = write!(
+                strip,
+                "<div><div class=\"d\">{} {}</div><div class=\"t\">{:.0}&deg; <i>{:.0}&deg;</i></div><div class=\"w\">{}</div><div class=\"s\">{}</div><div class=\"w\">{} {:.0}, gusts {:.0}</div></div>",
+                sun::weekday(dd),
+                date_short(dd),
+                d.tmax,
+                d.tmin,
+                climate::code_words(d.code),
+                wet,
+                ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][(((d.dir as f64 % 360.0) + 22.5) / 45.0) as usize % 8],
+                d.wind,
+                d.gust
+            );
+        }
+        Ok(format!(
+            "<div class=\"fc\" data-forecast=\"{}\">{}</div><p class=\"stamp\" data-forecast-stamp>Forecast as of {}. With a connection this strip refreshes itself.</p>",
+            esc(&climate::forecast_url(lat, lon)),
             strip,
-            "<div><div class=\"d\">{} {}</div><div class=\"t\">{:.0}&deg; <i>{:.0}&deg;</i></div><div class=\"w\">{}</div><div class=\"s\">{}</div><div class=\"w\">{} {:.0}, gusts {:.0}</div></div>",
-            sun::weekday(dd),
-            date_short(dd),
-            d.tmax,
-            d.tmin,
-            climate::code_words(d.code),
-            wet,
-            geo::compass(d.dir as f64).chars().take(2).collect::<String>(),
-            d.wind,
-            d.gust
-        );
-    }
+            esc(&f.fetched)
+        ))
+    };
     let forecast_block = format!(
-        "<div class=\"fc\" data-forecast=\"{}\">{}</div><p class=\"stamp\" data-forecast-stamp>Forecast as of {}. With a connection this strip refreshes itself.</p><p class=\"small\">Highs and lows in &deg;C at {:.0} m, wind in km/h. A global model on a coarse grid: ridge top wind will run stronger than shown.</p>",
-        esc(&climate::forecast_url()),
-        strip,
-        esc(&fc.fetched),
-        world.wpt_elev
+        "<h3>At the waypoint, {} m</h3>{}<h3>On the ridge, {} m</h3>{}<p class=\"small\">Highs and lows in &deg;C, wind in km/h. The forecast model works on a coarse grid and scales its temperatures to {:.0} m for the waypoint and {:.0} m for the ridge point. Ridge top wind will run stronger than shown.</p>",
+        chart::thousands(world.wpt_elev),
+        strip_for(fc, config::WPT_LAT, config::WPT_LON)?,
+        chart::thousands(p.ridge_elev),
+        strip_for(fc_ridge, config::RIDGE_LAT, config::RIDGE_LON)?,
+        fc.elevation,
+        fc_ridge.elevation
     );
+    // The warnings quote the ridge, where the weather is worse.
+    let fc = fc_ridge;
     let snow_soon: f32 = fc.days.iter().take(4).map(|d| d.snow).sum();
     let cold = fc.days.iter().take(7).map(|d| d.tmin).fold(f32::MAX, f32::min);
     let gust = fc.days.iter().take(7).map(|d| d.gust).fold(f32::MIN, f32::max);
@@ -363,17 +414,19 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         b.push_str("<main class=\"wrap\">");
         let _ = write!(
             b,
-            "<p class=\"lede\" style=\"margin-top:34px\">Caw Ridge is a high, open ridge in the foothills {:.0} km north-west of Grande Cache: alpine tundra and rock above a sea of spruce and pine, the home of the most studied mountain goat herd on earth, and the far end of a rough road. This guide gathers what the public record knows about the ground around your waypoint, draws it as maps, and sets out the rules and the risks.</p>",
-            town_km
+            "<p class=\"lede\" style=\"margin-top:34px\">Caw Ridge is a high, open ridge in the foothills {:.0} km north-west of Grande Cache: alpine tundra and rock above a sea of spruce and pine, the home of the most studied mountain goat herd on earth, and the far end of a rough road. Your waypoint is the way in: the turnoff on Beaverdam Road at {} m, where the old exploration road leaves the gravel and climbs to the ridge. This guide gathers what the public record knows about the ground between the two, draws it as maps, and sets out the rules and the risks.</p>",
+            geo::haversine(config::TOWN.0, config::TOWN.1, config::RIDGE_LON, config::RIDGE_LAT) / 1000.0,
+            chart::thousands(world.wpt_elev)
         );
         let (tr, ts) = today.as_ref().map(|t| (sun::hm(t.rise), sun::hm(t.set))).unwrap_or_default();
         let (tl0, tl1, tz) = today.as_ref().map(|t| (sun::hm(t.legal_start), sun::hm(t.legal_end), t.zone)).unwrap_or_default();
         let _ = write!(
             b,
             "<dl class=\"facts\">\
-<div class=\"fact\"><dt>Elevation</dt><dd>{} m<small>{} ft. In the alpine: forest gives out near {:.0} m.</small></dd></div>\
+<div class=\"fact\"><dt>Elevation</dt><dd>{} m<small>{} ft. {}</small></dd></div>\
 <div class=\"fact\"><dt>Wildlife management unit</dt><dd>WMU 446<small>Kakwa River. Checked against the official boundary file.</small></dd></div>\
-<div class=\"fact\"><dt>From Grande Cache</dt><dd>{:.0} km by road<small>{:.0} km paved, {:.0} km gravel, {:.0} km rough track. {:.0} km in a straight line.</small></dd></div>\
+<div class=\"fact\"><dt>From Grande Cache</dt><dd>{:.0} km by road<small>{:.0} km paved and {:.0} km gravel, to within {:.0} m of the waypoint. {:.0} km in a straight line.</small></dd></div>\
+<div class=\"fact\"><dt>On to the ridge</dt><dd>{:.1} km, {} m up<small>By the old road, then {:.1} km over open ground to the ridge point. About {} on foot.</small></dd></div>\
 <div class=\"fact\"><dt>Land</dt><dd>Crown land<small>{} Treaty 8 territory.</small></dd></div>\
 <div class=\"fact\"><dt>Legal light, {}</dt><dd>{} to {}<small>Sunrise {}, sunset {} {}. Half an hour either side.</small></dd></div>\
 <div class=\"fact\"><dt>Compass</dt><dd>{:.1}&deg; east<small>Magnetic declination, autumn 2026. Grid north is {:.1}&deg; west of true.</small></dd></div>\
@@ -382,12 +435,20 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
 </dl>",
             chart::thousands(world.wpt_elev),
             chart::thousands(world.wpt_elev * 3.28084),
-            (p.stats.treeline / 10.0).round() * 10.0,
+            if world.wpt_elev < p.stats.treeline {
+                format!("In {}. Forest runs up to about {} m, and the ridge point is {} m above you.", p.stats.wpt_cover.to_lowercase(), chart::thousands((p.stats.treeline / 10.0).round() * 10.0), chart::thousands(p.ridge_elev - world.wpt_elev))
+            } else {
+                format!("In the alpine: forest gives out near {} m.", chart::thousands((p.stats.treeline / 10.0).round() * 10.0))
+            },
             km_total,
             km_hwy,
             km_gravel,
-            km_track,
+            p.road_gap_m.max(5.0),
             town_km,
+            km_climb,
+            chart::thousands(climb_gain),
+            km_walk,
+            hours(p.foot_up_h),
             format!(
                 "{} {}",
                 match &p.stats.park { Some(n) => format!("Inside {n}."), None => "Not in a park.".to_string() },
@@ -411,29 +472,45 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         let _ = write!(
             b,
             "<li><div><b>There is no mountain goat season here.</b><span>WMU 446 has no goat season of any kind. The Caw Ridge goats are a research herd, followed animal by animal since 1989 and not hunted since 1969. Many carry ear tags or collars. Leave them be, and give them room.</span></div></li>\
-<li><div><b>Caribou and grizzly bear are closed everywhere in Alberta.</b><span>The waypoint is inside the Redrock-Prairie Creek caribou range and the core grizzly recovery zone. Be certain of your target: a caribou is not an elk, and a grizzly is not a black bear.</span></div></li>\
+<li><div><b>Caribou and grizzly bear are closed everywhere in Alberta.</b><span>{} Be certain of your target: a caribou is not an elk, and a grizzly is not a black bear.</span></div></li>\
 <li><div><b>Know what your tag allows.</b><span>In 446, elk must be six point or better, moose in the rifle season is by draw, bighorn sheep is by draw only, and deer are on a general tag. The <a href=\"regulations.html\">regulations page</a> has the table.</span></div></li>\
-<li><div><b>No weapon on a quad before noon.</b><span>In WMUs 400 to 446 it is unlawful to carry a weapon on an off-highway vehicle from one hour before sunrise until noon during an open big game season. The last {:.0} km to the ridge is an off-highway vehicle trail.</span></div></li>\
+<li><div><b>No weapon on a quad before noon.</b><span>In WMUs 400 to 446 it is unlawful to carry a weapon on an off-highway vehicle from one hour before sunrise until noon during an open big game season. The {:.0} km from your waypoint up to the ridge is an off-highway vehicle trail. On foot it is about {} up and {} down.</span></div></li>\
 <li><div><b>The road in crosses a working coal mine.</b><span>Beaverdam Road runs through mine property. The municipal district's instruction is plain: stay on Beaverdam Road. Mine roads are private.</span></div></li>\
-<li><div><b>Your waypoint sits in a bowl.</b><span>From the waypoint a standing hunter sees only {:.1} km&sup2; of ground. Walk {:.1} km to glassing point {} and you command {:.1} km&sup2; of open country. The <a href=\"terrain.html\">terrain page</a> shows where to sit.</span></div></li>\
-<li><div><b>Winter comes early at {:.0} m.</b><span>The first snow that stays a while has arrived between late September and late October in most recent years. The forecast when this page was built: {} over the next four days, a low of {:.0}&deg;C and gusts to {:.0} km/h this week.</span></div></li>\
-<li><div><b>Plan on no phone signal.</b><span>Coverage is confirmed only in town. Carry a satellite messenger, leave a trip plan, and know that the nearest emergency room is in Grande Cache, {:.0} km back down the road.</span></div></li></ol>",
-            km_track,
-            p.stats.seen_km2_wpt,
-            g1.dist_m / 1000.0,
+<li><div><b>{}</b><span>{} The best glassing point found, {}, sees {:.1} km&sup2; of open country and is about {} on foot from the waypoint. The <a href=\"terrain.html\">terrain page</a> shows where to sit.</span></div></li>\
+<li><div><b>Winter comes early.</b><span>In recent winters the first snow reached the ridge point, at {} m, between {} and {}, and the waypoint between {} and {}. The ridge forecast when this page was built: {} over the next four days, a low of {:.0}&deg;C and gusts to {:.0} km/h this week.</span></div></li>\
+<li><div><b>Plan on no phone signal.</b><span>Coverage is confirmed only in town. Carry a satellite messenger, leave a trip plan, and know that the nearest emergency room is in Grande Cache, {:.0} km back down the road from the waypoint.</span></div></li></ol>",
+            format!(
+                "The waypoint is {} and {} the core grizzly recovery zone.",
+                match &p.stats.caribou_range { Some(n) => format!("inside the {n} caribou range"), None => "outside the mapped caribou ranges".to_string() },
+                if p.stats.grizzly_core { "inside" } else { "outside" }
+            ),
+            km_climb,
+            hours(p.foot_up_h),
+            hours(p.foot_down_h),
+            if in_timber { "Your waypoint is in the timber." } else { "Your waypoint is in open country." },
+            if in_timber {
+                format!("{} of the ground within 3 km of it is forest. The open country is on the ridge above.", pct(forest_3km))
+            } else {
+                format!("From it a standing hunter sees {:.1} km&sup2; of ground.", p.stats.seen_km2_wpt)
+            },
             g1.name,
             g1.open_km2,
-            world.wpt_elev,
+            hours(g1.walk_h),
+            chart::thousands(p.ridge_elev),
+            snow_ridge.0,
+            snow_ridge.1,
+            snow_wpt.0,
+            snow_wpt.1,
             if snow_soon >= 0.5 { format!("{snow_soon:.0} cm of snow") } else { "no snow".to_string() },
             cold,
             gust,
             km_total
         );
-        b.push_str("<h2>The weather on the ridge</h2>");
+        b.push_str("<h2>The weather, low and high</h2>");
         b.push_str(&forecast_block);
         b.push_str("<p><a href=\"weather.html\">Ten autumns of weather, first snow dates, and sun and moon tables</a></p>");
         b.push_str("<h2>The ground</h2>");
-        b.push_str(&map_figure(p, "ridge_topo", "Drawn for this guide from the national 30 m elevation model, with 20 m contours and a 1 km UTM grid."));
+        b.push_str(&map_figure(p, "close_topo", "The waypoint in the valley, the ridge point above it, and the old road between. Drawn for this guide from the national 30 m elevation model."));
         b.push_str("<h2>In this guide</h2><div class=\"cards\">");
         let maps_text = format!("{} sheets: topographic, satellite, height, slope, aspect, landforms, cover, wind shelter, sun, snow, walking time and what is in view. View, download, print.", p.maps.len());
         for (n, href, title, text) in [
@@ -450,7 +527,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             let _ = write!(b, "<a class=\"card plain\" href=\"{href}\"><div class=\"body\"><span class=\"num\">{n}</span><h3>{title}</h3><p>{text}</p></div></a>");
         }
         b.push_str("</div>");
-        b.push_str("<h2>Take it with you</h2><p>There is no signal on the ridge. Save the guide to your phone before you leave town: every page, every map and the explorer will then open with no connection.</p><div class=\"btnrow\"><button class=\"btn\" type=\"button\" data-save-offline>Save everything for offline use</button><a class=\"btn ghost\" href=\"data/cawridge.gpx\" download>GPX for your GPS</a><a class=\"btn ghost\" href=\"maps/ridge_topo.png\" download>Print map (PNG)</a></div><p class=\"small\" data-save-status>About 150 MB. Use wifi.</p>");
+        b.push_str("<h2>Take it with you</h2><p>There is no signal on the ridge. Save the guide to your phone before you leave town: every page, every map and the explorer will then open with no connection.</p><div class=\"btnrow\"><button class=\"btn\" type=\"button\" data-save-offline>Save everything for offline use</button><a class=\"btn ghost\" href=\"data/cawridge.gpx\" download>GPX for your GPS</a><a class=\"btn ghost\" href=\"maps/ridge_topo.png\" download>Print map (PNG)</a></div><p class=\"small\" data-save-status>About 200 MB. Use wifi.</p>");
         b.push_str("</main>");
         emit(Page { slug: "index.html", title: "Overview", description: "A hunter's field guide to Caw Ridge, Alberta: maps, terrain analysis, regulations for WMU 446, access, wildlife, weather and safety.", body: b, head: "", scripts: "", footer: true });
     }
@@ -533,7 +610,8 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             "declination": (world.declination * 10.0).round() / 10.0,
             "maps": maps_obj,
             "layers": layers,
-            "places": pl
+            "places": pl,
+            "start": [[config::CLOSE.s, config::CLOSE.w], [config::CLOSE.n, config::CLOSE.e]]
         });
         let b = "<div id=\"map\" aria-label=\"Interactive map of Caw Ridge\"></div><div class=\"side low\"><section class=\"card3\" id=\"infowrap\" hidden aria-live=\"polite\"><button type=\"button\" class=\"x\" data-close-info>Close</button><div id=\"info\"></div></section></div>".to_string();
         let scripts = format!("<script>window.CAW={};</script><script src=\"assets/terrain-data.js\"></script><script src=\"vendor/leaflet/leaflet.js\"></script><script src=\"assets/explore.js\"></script>", caw.to_string().replace("</", "<\\/"));
@@ -562,7 +640,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         let layers: Vec<serde_json::Value> = names
             .iter()
             .filter(|n| p.maps.iter().any(|m| m.id == format!("ridge_{}", n.0)))
-            .map(|n| serde_json::json!({"id": n.0, "name": n.1, "blurb": n.2, "ridge": format!("maps/bare/ridge_{}.jpg", n.0), "close": format!("maps/bare/close_{}.jpg", n.0)}))
+            .map(|n| serde_json::json!({"id": n.0, "name": n.1, "blurb": n.2, "ridge": format!("maps/drape/ridge_{}.jpg", n.0), "close": format!("maps/drape/close_{}.jpg", n.0)}))
             .collect();
         let pl: Vec<serde_json::Value> = places.iter().map(|q| serde_json::json!({"name": q.name, "short": q.short, "kind": q.kind, "lat": q.lat, "lon": q.lon, "elev": q.elev.round(), "note": q.note})).collect();
         let mut routes: Vec<serde_json::Value> = p.drive.iter().map(|l| serde_json::json!({"kind": "drive", "pts": l.pts.iter().map(|q| vec![q.0, q.1]).collect::<Vec<_>>()})).collect();
@@ -614,36 +692,53 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         let _ = write!(
             b,
             "<dl class=\"facts\">\
-<div class=\"fact\"><dt>Within 3 km of the waypoint</dt><dd>{:.0} to {:.0} m<small>Lowest and highest ground.</small></dd></div>\
+<div class=\"fact\"><dt>Within 3 km of the waypoint</dt><dd>{} to {} m<small>Lowest and highest ground.</small></dd></div>\
 <div class=\"fact\"><dt>Open ground</dt><dd>{}<small>Shrub, tundra, grass and rock. The rest is timber.</small></dd></div>\
-<div class=\"fact\"><dt>Forest gives out at</dt><dd>About {:.0} m<small>95 percent of forest cells lie below this height.</small></dd></div>\
+<div class=\"fact\"><dt>Forest gives out at</dt><dd>About {} m<small>95 percent of the forest on the sheet lies below this height.</small></dd></div>\
 <div class=\"fact\"><dt>Steeper than 30&deg;</dt><dd>{}<small>Of the ground within 3 km, by the 30 m model.</small></dd></div></dl>",
-            p.stats.elev_min_3km,
-            p.stats.elev_max_3km,
+            chart::thousands(p.stats.elev_min_3km),
+            chart::thousands(p.stats.elev_max_3km),
             pct(p.stats.cover_3km.iter().filter(|c| !c.0.contains("forest") && c.0 != "Water").map(|c| c.1).sum()),
-            (p.stats.treeline / 10.0).round() * 10.0,
+            chart::thousands((p.stats.treeline / 10.0).round() * 10.0),
             pct(p.stats.slope_3km.iter().skip(3).map(|s| s.1).sum())
         );
         let _ = write!(
             b,
-            "<h2>The waypoint is in a bowl</h2><p>Your waypoint lies at {} m on ground that faces {} and falls away at about {:.0}&deg;. Higher ground stands close by: {} m at {:.0} m to the {}, and more of it beyond. The sight lines say that a hunter standing at the waypoint sees {:.1} km&sup2;, which is {:.1} percent of the ground within 8 km. It is a sheltered place, out of the worst of the wind and off the skyline. It is a poor place to glass from.</p>",
+            "<h2>What you can see from the waypoint</h2><p>Your waypoint lies at {} m on ground that faces {} and falls away at about {:.0}&deg;. The highest ground within a kilometre is {} m, {:.0} m away to the {}. The program classes the spot as {}. The sight lines say that someone standing at the waypoint has {:.1} km&sup2; in view, which is {:.1} percent of the ground within 8 km.</p><p>{}</p>",
             chart::thousands(world.wpt_elev),
             geo::compass_words(p.stats.wpt_aspect as f64),
             p.stats.wpt_slope,
             chart::thousands(p.stats.rim.0),
             (p.stats.rim.2 / 10.0).round() * 10.0,
             geo::compass_words(p.stats.rim.1),
+            p.stats.wpt_landform.to_lowercase(),
             p.stats.seen_km2_wpt,
-            p.stats.seen_share_wpt * 100.0
+            p.stats.seen_share_wpt * 100.0,
+            if in_timber {
+                format!("That figure is for bare earth. The waypoint stands in {}, and {} of the ground within 3 km is forest, so from the road you will see the trees in front of you and the skyline above them. What the map shows is which slopes face you: the ones to watch from a clearing, and the ones from which a truck or a camp can be seen.", p.stats.wpt_cover.to_lowercase(), pct(forest_3km))
+            } else {
+                "The ground is open, so most of what the sight lines promise you will have.".to_string()
+            }
         );
         b.push_str(&map_figure(p, "close_view", "Yellow is in view from the waypoint, dark is hidden. Yellow diamonds are the glassing points."));
-        b.push_str("<h2>Where to glass from</h2><p>The program tried a candidate every 180 m across the close sheet, let each one shuffle to the highest ground nearby, and counted the open ground it could see between 300 m and 3 km with an eye 1.7 m up and an animal's back 1.0 m up. Timber was left out of the count: you cannot glass into it. The eight best, kept at least 700 m apart:</p>");
-        b.push_str("<div class=\"scroll\"><table><thead><tr><th>Point</th><th class=\"n\">Open ground in view</th><th class=\"n\">Share of open ground</th><th class=\"n\">Height</th><th class=\"n\">From waypoint</th><th>Bearing</th><th>Latitude, longitude</th><th>UTM 11U</th><th>See it</th></tr></thead><tbody>");
+        let _ = write!(
+            b,
+            "<div class=\"notice\"><h3>The ridge point</h3><p>Your first point, {:.1} km away at {:.0}&deg; true and {} m higher, is the opposite kind of place: open alpine at {} m, but set in the head of a basin with higher ground on three sides. A standing hunter there sees only {:.1} km&sup2;, little beyond the bowl itself. It is sheltered and off the skyline, and a poor place to glass from. <a href=\"terrain3d.html?stand=1&amp;lat={:.5}&amp;lon={:.5}\">Stand on it in 3D</a> to see for yourself.</p></div>",
+            ridge_km,
+            ridge_brg,
+            chart::thousands(p.ridge_elev - world.wpt_elev),
+            chart::thousands(p.ridge_elev),
+            p.stats.seen_km2_ridge,
+            config::RIDGE_LAT,
+            config::RIDGE_LON
+        );
+        b.push_str("<h2>Where to glass from</h2><p>The glassing is on the ridge, not at the waypoint. The program tried a candidate every 180 m across the whole sheet, valley and ridge alike, let each one shuffle to the highest ground nearby, and counted the open ground it could see between 300 m and 3 km with an eye 1.7 m up and an animal's back 1.0 m up. Timber was left out of the count: you cannot glass into it. The eight best, kept at least 700 m apart:</p>");
+        b.push_str("<div class=\"scroll\"><table><thead><tr><th>Point</th><th class=\"n\">Open ground in view</th><th class=\"n\">Share of open ground</th><th class=\"n\">Height</th><th class=\"n\">From waypoint</th><th>Bearing</th><th class=\"n\">On foot</th><th>Latitude, longitude</th><th>UTM 11U</th><th>See it</th></tr></thead><tbody>");
         for v in &p.vantages {
             let u = geo::Utm::new(11).forward(v.lon, v.lat);
             let _ = write!(
                 b,
-                "<tr><td><b>{}</b></td><td class=\"n\">{:.1} km&sup2;</td><td class=\"n\">{}</td><td class=\"n\">{} m</td><td class=\"n\">{:.1} km</td><td>{:.0}&deg; {}</td><td class=\"mono\">{:.5}, {:.5}</td><td class=\"mono\">{:06.0} E {:.0} N</td><td><a href=\"terrain3d.html?stand=1&amp;lat={:.5}&amp;lon={:.5}\">Stand here</a></td></tr>",
+                "<tr><td><b>{}</b></td><td class=\"n\">{:.1} km&sup2;</td><td class=\"n\">{}</td><td class=\"n\">{} m</td><td class=\"n\">{:.1} km</td><td>{:.0}&deg; {}</td><td class=\"n\">{}</td><td class=\"mono\">{:.5}, {:.5}</td><td class=\"mono\">{:06.0} E {:.0} N</td><td><a href=\"terrain3d.html?stand=1&amp;lat={:.5}&amp;lon={:.5}\">Stand here</a></td></tr>",
                 v.name,
                 v.open_km2,
                 pct(v.share),
@@ -651,6 +746,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
                 v.dist_m / 1000.0,
                 v.bearing,
                 geo::compass(v.bearing),
+                hours(v.walk_h),
                 v.lat,
                 v.lon,
                 u.0,
@@ -774,10 +870,11 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         let above: f32 = p.bands.iter().filter(|b| b.0 >= (p.stats.treeline / 100.0).floor() * 100.0).map(|b| b.1).sum();
         let _ = write!(
             b,
-            "</div><div><p>The close sheet runs from {} m in the creek bottoms to {} m on the highest top. Your waypoint, at {} m, is near the upper end: {} of the sheet lies at or above the band where the forest gives out.</p><p>Height is the first thing that sorts animals in autumn. Goats and sheep hold the top bands near steep ground. Elk and mule deer work the edge of the timber and drop as the snow deepens. Moose stay low, in the willow.</p></div></div>",
+            "</div><div><p>The sheet runs from {} m in the creek bottoms to {} m on the highest top. Your waypoint, at {} m, is near the bottom of it: {} of the sheet lies above you, and {} lies at or above the band where the forest gives out.</p><p>Height is the first thing that sorts animals in autumn. Goats and sheep hold the top bands near steep ground. Elk and mule deer work the edge of the timber and drop as the snow deepens. Moose stay low, in the willow, at about the height of your waypoint.</p></div></div>",
             chart::thousands(p.bands.first().map(|b| b.0).unwrap_or(0.0)),
             chart::thousands(p.bands.last().map(|b| b.0 + 100.0).unwrap_or(0.0)),
             chart::thousands(world.wpt_elev),
+            pct(p.bands.iter().filter(|b| b.0 >= (world.wpt_elev / 100.0).ceil() * 100.0).map(|b| b.1).sum()),
             pct(above)
         );
         b.push_str(&map_figure(p, "close_height", "Height in 100 m bands, with summits and saddles."));
@@ -828,27 +925,29 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
 
         let _ = write!(
             b,
-            "<h2>Walking</h2><p>Walking times come from Tobler's hiking function, a rule of thumb fitted to real walkers: about 5 km/h on the level, fastest on a gentle downhill, and slower the steeper it gets in either direction. On roads and tracks the full speed is used; off them, three fifths of it, which is Tobler's own figure for open ground without a path.</p><p>From the end of the mapped track to the waypoint is {:.1} km and about {:.0} minutes; coming back, about {:.0} minutes. The model knows nothing of a loaded pack, snow, deadfall, willow, or a creek in flood. Add half again for a real day, and double it with a quarter on your back.</p>",
-            p.walk_profile.pts.last().map(|q| q.0).unwrap_or(0.0),
-            p.walk_out_h * 60.0,
-            p.walk_back_h * 60.0
+            "<h2>Walking</h2><p>Walking times come from Tobler's hiking function, a rule of thumb fitted to real walkers: about 5 km/h on the level, fastest on a gentle downhill, and slower the steeper it gets in either direction. On roads and tracks the full speed is used; off them, three fifths of it, which is Tobler's own figure for open ground without a path.</p><p>From the waypoint to the ridge point is {:.1} km up the old road and {:.1} km across open ground, a climb of {} m. The model makes it about {} up and {} back down. The model knows nothing of a loaded pack, snow, deadfall, willow, or a creek in flood. Add half again for a real day, and double it with a quarter on your back.</p>",
+            km_climb,
+            km_walk,
+            chart::thousands(p.ridge_elev - world.wpt_elev),
+            hours(p.foot_up_h),
+            hours(p.foot_down_h)
         );
-        b.push_str(&map_figure(p, "ridge_walk", "Time to walk from the waypoint to anywhere on the sheet."));
+        b.push_str(&map_figure(p, "close_walk", "Time to walk from the waypoint to anywhere on the sheet. The old road shows as a tongue of quick going up to the ridge."));
         b.push_str("</main>");
         emit(Page { slug: "terrain.html", title: "Terrain", description: "Terrain analysis of Caw Ridge: glassing points, visibility, slope, aspect, ground cover, sun exposure and walking times.", body: b, head: "", scripts: "", footer: true });
     }
 
     // -------------------------------------------------------------- access
     {
-        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Getting there</p><h1>The road to the ridge</h1>");
+        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Getting there</p><h1>The road to the waypoint</h1>");
         let _ = write!(
             b,
-            "<p class=\"lede\">From Grande Cache it is {:.0} km to the top: {:.0} km of pavement, {:.0} km of gravel through coal mine country, and {:.0} km of old exploration road that climbs {} m to the alpine.</p></div>",
+            "<p class=\"lede\">From Grande Cache it is {:.0} km to your waypoint: {:.0} km of pavement and {:.0} km of gravel through coal mine country. The waypoint is the Caw Ridge turnoff. From it an old exploration road climbs {} m in {:.1} km to the alpine.</p></div><h2>The drive</h2>",
             km_total,
             km_hwy,
             km_gravel,
-            km_track,
-            chart::thousands(p.drive.iter().find(|l| l.kind == "track").map(|l| { let pr = crate::route::profile(&world.dem, &l.pts, 30.0, 200.0); pr.pts.last().map(|q| q.1).unwrap_or(0.0) - pr.pts.first().map(|q| q.1).unwrap_or(0.0) }).unwrap_or(0.0))
+            chart::thousands(climb_gain),
+            km_climb
         );
         b.push_str("<div class=\"scroll\"><table><thead><tr><th>Leg</th><th>Road</th><th>Surface</th><th class=\"n\">Distance</th><th class=\"n\">Running total</th><th>Notes</th></tr></thead><tbody>");
         let mut run = 0.0;
@@ -868,20 +967,14 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             run += l.km;
             let _ = write!(b, "<tr><td class=\"n\">{n}</td><td><b>{road}</b></td><td>{surface}</td><td class=\"n\">{:.1} km</td><td class=\"n\">{:.1} km</td><td>{note}</td></tr>", l.km, run);
         }
-        let _ = write!(
-            b,
-            "<tr><td class=\"n\">{}</td><td><b>On foot to the waypoint</b></td><td>Open alpine</td><td class=\"n\">{:.1} km</td><td class=\"n\">{:.1} km</td><td>No trail. About {:.0} minutes by the walking model.</td></tr></tbody></table></div>",
-            n + 1,
-            p.walk_profile.pts.last().map(|q| q.0).unwrap_or(0.0),
-            run + p.walk_profile.pts.last().map(|q| q.0).unwrap_or(0.0),
-            p.walk_out_h * 60.0
-        );
+        let _ = (km_track, n);
+        let _ = write!(b, "<tr><td class=\"n\"></td><td><b>Waypoint</b></td><td></td><td class=\"n\"></td><td class=\"n\">{:.1} km</td><td>The Caw Ridge turnoff, on the left. The road passes within {:.0} m of the point you gave. A staging area is reported here.</td></tr></tbody></table></div>", run, p.road_gap_m.max(5.0));
         let _ = write!(
             b,
             "<div class=\"viz\"><h3>The drive in profile</h3><p class=\"sub\">Height above sea level along the route from Grande Cache, metres. Low point {} m, high point {} m.</p>{}{}</div>",
             chart::thousands(p.drive_profile.min),
             chart::thousands(p.drive_profile.max),
-            chart::area("Elevation along the drive from Grande Cache to the ridge", &p.drive_profile.pts, "km from Grande Cache", "m", &marks),
+            chart::area("Elevation along the drive from Grande Cache to the waypoint", &p.drive_profile.pts, "km from Grande Cache", "m", &marks),
             chart::table(
                 "Show the numbers",
                 &["Distance", "Height"],
@@ -890,6 +983,36 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         );
         b.push_str("<p>The route above was found by the program in OpenStreetMap, preferring better roads. It matches the directions published by the Municipal District of Greenview almost to the hundred metres: 8.1 km north on Highway 40, 30 km along Beaverdam Road to the Caw Ridge turnoff on the left, then 8.1 km up the old road to the top.</p>");
         b.push_str(&map_figure(p, "region_topo", "The whole approach on one sheet."));
+        let _ = write!(
+            b,
+            "<h2>On from the waypoint to the ridge</h2><p>The old road leaves the gravel at your waypoint and climbs {} m in {:.1} km to the ridge top at about {} m. It is an old mining exploration road, not maintained: eroded, with long cobble sections. Treat it as a route for an off-highway vehicle, a horse or your feet, not for a truck. From where the mapped track ends it is {:.1} km over open alpine to the ridge point.</p>\
+<div class=\"scroll\"><table><thead><tr><th>Leg</th><th>Way</th><th class=\"n\">Distance</th><th class=\"n\">Climb</th><th class=\"n\">On foot, up</th><th class=\"n\">On foot, down</th></tr></thead><tbody>\
+<tr><td><b>Old road</b></td><td>Rough track</td><td class=\"n\">{:.1} km</td><td class=\"n\">{} m</td><td class=\"n\" rowspan=\"2\">{}</td><td class=\"n\" rowspan=\"2\">{}</td></tr>\
+<tr><td><b>To the ridge point</b></td><td>Open alpine, no trail</td><td class=\"n\">{:.1} km</td><td class=\"n\">{} m</td></tr></tbody></table></div>",
+            chart::thousands(climb_gain),
+            km_climb,
+            chart::thousands(p.climb_profile.pts.last().map(|q| q.1).unwrap_or(0.0)),
+            km_walk,
+            km_climb,
+            chart::thousands(climb_gain),
+            hours(p.foot_up_h),
+            hours(p.foot_down_h),
+            km_walk,
+            chart::thousands(p.ridge_elev - p.climb_profile.pts.last().map(|q| q.1).unwrap_or(0.0))
+        );
+        let _ = write!(
+            b,
+            "<div class=\"viz\"><h3>The climb in profile</h3><p class=\"sub\">Height above sea level along the old road from the waypoint, metres. It starts at {} m and tops out at {} m.</p>{}{}</div>",
+            chart::thousands(p.climb_profile.pts.first().map(|q| q.1).unwrap_or(0.0)),
+            chart::thousands(p.climb_profile.max),
+            chart::area("Elevation along the old road from the waypoint to the ridge", &p.climb_profile.pts, "km from the waypoint", "m", &[]),
+            chart::table(
+                "Show the numbers",
+                &["Distance", "Height"],
+                &p.climb_profile.pts.iter().step_by((p.climb_profile.pts.len() / 40).max(1)).map(|q| vec![format!("{:.1} km", q.0), format!("{} m", chart::thousands(q.1))]).collect::<Vec<_>>()
+            )
+        );
+        b.push_str(&map_figure(p, "close_topo", "The waypoint, the old road and the ridge point."));
         b.push_str("<h2>What riders report</h2><p>None of what follows is official, and the newest of it is from 2023. It comes from public forum threads by people who have made the trip on quads and side-by-sides.</p><ul>\
 <li>Beaverdam Road is rough in a pickup and better suited to small trailers than large ones.</li>\
 <li>The highway to the ridge top is just shy of 50 km.</li>\
@@ -899,7 +1022,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
 <li>Snow closed the top to riders in late May 2008 and again in June 2013. In autumn the same drifts arrive early.</li>\
 <li>Fresh grizzly tracks are reported regularly along the access.</li></ul>\
 <div class=\"notice law\"><h3>Radio controlled roads</h3><p>Resource roads in this country carry loaded coal and log trucks. No radio channel is published for Beaverdam Road, and one forum post holds that radios are required of commercial traffic only. Drive with your lights on, keep right on blind corners, give trucks the road, and ask at the Grande Cache Tourism and Interpretive Centre (780-827-3300) about current conditions before you go.</p></div>\
-<div class=\"notice stop\"><h3>The off-highway vehicle weapons rule</h3><p>In WMUs 400 to 446 it is unlawful to carry a weapon on an off-highway vehicle from one hour before sunrise until noon during an open big game season. The exception is direct travel to an isolated campsite with the weapon and ammunition out of view in separate locked containers. If you ride the last 8 km to hunt the morning, you ride without your rifle or you wait until noon. Many hunters camp high or walk.</p></div>");
+<div class=\"notice stop\"><h3>The off-highway vehicle weapons rule</h3><p>In WMUs 400 to 446 it is unlawful to carry a weapon on an off-highway vehicle from one hour before sunrise until noon during an open big game season. The exception is direct travel to an isolated campsite with the weapon and ammunition out of view in separate locked containers. If you ride the 8 km from the waypoint to hunt the morning, you ride without your rifle or you wait until noon. Many hunters camp high or walk.</p></div>");
         let _ = write!(
             b,
             "<h2>Distances</h2><div class=\"scroll\"><table><thead><tr><th>From</th><th class=\"n\">To Grande Cache</th><th>Road</th></tr></thead><tbody>\
@@ -941,9 +1064,10 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         b.push_str("<div class=\"notice stop\"><h3>This page is not the law</h3><p>Seasons, quotas and rules change every year and sometimes mid-season. The printed guide is itself only a summary of the Wildlife Act and the Wildlife Regulation. Before you hunt, check your species and your WMU in the <a href=\"https://albertaregulations.ca/huntingregs/\">official guide</a>, and carry your licences and tags on paper.</p></div>");
         let _ = write!(
             b,
-            "<h2>Which unit you are in</h2><p>The waypoint lies in <b>Wildlife Management Unit 446, Kakwa River</b>. That was checked two ways: by a query against the Government of Alberta's own boundary service, and again by this guide's program, which tested the point against the official polygon. The nearest boundary is with WMU 442 (Sheep Creek), {:.1} km away at {:.0}&deg; true, along Grizzly and Copton creeks. WMU 444 (Mount Hamell) begins across Sheep Creek, about 11 km to the south-east.</p><p>The legal unit is the written description in the regulation, not any map: Smoky River, Sheep Creek, Horn Creek, the height of land to Copton Creek, Kakwa River, Prairie Creek and the 16th baseline. If you hunt near an edge, read the <a href=\"https://albertaregulations.ca/huntingregs/wmu/446.html\">description for 446</a>.</p>",
+            "<h2>Which unit you are in</h2><p>The waypoint lies in <b>Wildlife Management Unit 446, Kakwa River</b>, and so does the ridge point. That was checked two ways: by a query against the Government of Alberta's own boundary service, and again by this guide's program, which tested the points against the official polygon. The nearest boundary is {:.1} km from the waypoint at {:.0}&deg; true. {}</p><p>The legal unit is the written description in the regulation, not any map: Smoky River, Sheep Creek, Horn Creek, the height of land to Copton Creek, Kakwa River, Prairie Creek and the 16th baseline. If you hunt near an edge, read the <a href=\"https://albertaregulations.ca/huntingregs/wmu/446.html\">description for 446</a>.</p>",
             wmu_edge.0 / 1000.0,
-            wmu_edge.1
+            wmu_edge.1,
+            p.stats.wmu_near.iter().take(2).map(|u| format!("{} begins {:.1} km away to the {}.", u.0, u.1 / 1000.0, geo::compass_words(u.2))).collect::<Vec<_>>().join(" ")
         );
         b.push_str(&map_figure(p, "region_topo", "Wildlife management units in purple, parks in green."));
         b.push_str("<h2>2026 seasons in WMU 446</h2><div class=\"scroll\"><table><thead><tr><th>Species</th><th>What may be taken</th><th>Archery only</th><th>General season</th><th>Licence</th></tr></thead><tbody>\
@@ -1018,7 +1142,16 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     {
         let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Wildlife</p><h1>What lives on the ridge</h1><p class=\"lede\">Caw Ridge carries nearly the whole cast of the northern Rockies on one small piece of alpine: goats, sheep, caribou, grizzlies, wolves, and the elk, moose and deer of the timber below. Some you may hunt. Several you may not.</p></div>");
         b.push_str(&map_figure(p, "region_wildlife", "Provincial goat and sheep range in purple hatching, caribou range in orange."));
-        b.push_str("<h2>Mountain goat <span class=\"tag closed\">Closed in 446</span></h2><p>The waypoint lies inside the range the province maps for mountain goat and bighorn sheep. The goats of Caw Ridge are the subject of the longest study of the species anywhere. Biologists from the Universit&eacute; de Sherbrooke and Universit&eacute; Laval, working with Alberta Fish and Wildlife, have followed them since 1989, marking kids and recording who lives, who breeds and who dies. By 2009 they had marked 427 animals. The herd has numbered between about 76 and 160, and was reported in decline through the 2010s.</p><ul>\
+        let _ = write!(
+            b,
+            "<h2>Mountain goat <span class=\"tag closed\">Closed in 446</span></h2><p>{}</p>",
+            match (p.stats.goat_sheep_range, p.stats.ridge_goat_sheep_range) {
+                (true, _) => "Your waypoint lies inside the range the province maps for mountain goat and bighorn sheep.",
+                (false, true) => "Your waypoint, down in the timber, lies outside the range the province maps for mountain goat and bighorn sheep. The ridge point above it lies inside.",
+                (false, false) => "Neither your waypoint nor the ridge point lies inside the range the province maps for mountain goat and bighorn sheep, though the ridge between them does.",
+            }
+        );
+        b.push_str("<p>The goats of Caw Ridge are the subject of the longest study of the species anywhere. Biologists from the Universit&eacute; de Sherbrooke and Universit&eacute; Laval, working with Alberta Fish and Wildlife, have followed them since 1989, marking kids and recording who lives, who breeds and who dies. By 2009 they had marked 427 animals. The herd has numbered between about 76 and 160, and was reported in decline through the 2010s.</p><ul>\
 <li>They have not been hunted since 1969. There is no goat season in WMU 446.</li>\
 <li>They use the alpine between about 1,750 and 2,170 m, never far from steep ground to escape to.</li>\
 <li>The study found that goats are easily disturbed. A quad approaching fast is likely to put them on alert for ten minutes or send them running more than 100 m, and helicopters within 500 m moved them most of the time. Keep your distance, slow down, and do not approach for a photograph.</li>\
@@ -1044,17 +1177,23 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     // ------------------------------------------------------------- weather
     {
         let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Weather</p><h1>Sky, snow and light</h1>");
-        let _ = write!(b, "<p class=\"lede\">The ridge top is {:.0} m above Grande Cache and lives in different weather. Expect it four to five degrees colder than town, windier, and white weeks earlier.</p></div>", world.wpt_elev - 1250.0);
-        b.push_str("<h2>Forecast for the waypoint</h2>");
+        let _ = write!(
+            b,
+            "<p class=\"lede\">You will be in two climates. The waypoint, at {} m, has the weather of Grande Cache. The ridge point is {} m higher: about {:.0} degrees colder at the usual rate, and windier.</p></div>",
+            chart::thousands(world.wpt_elev),
+            chart::thousands(p.ridge_elev - world.wpt_elev),
+            (p.ridge_elev - world.wpt_elev) * 0.0065
+        );
+        b.push_str("<h2>Forecast</h2>");
         b.push_str(&forecast_block);
         b.push_str("<p>For a second opinion before you leave town:</p><ul>\
 <li><a href=\"https://weather.gc.ca/en/location/index.html?coords=53.888,-119.119\">Environment Canada, Grande Cache</a>: the official forecast and any warnings, for the valley.</li>\
-<li><a href=\"https://spotwx.com/products/grib_index.php?model=gem_lam_continental&amp;lat=54.06271&amp;lon=-119.39073\">SpotWx</a>: Canadian high resolution model runs for the exact point.</li>\
+<li><a href=\"https://spotwx.com/products/grib_index.php?model=gem_lam_continental&amp;lat=54.06271&amp;lon=-119.39073\">SpotWx</a>: Canadian high resolution model runs for the ridge point.</li>\
 <li><a href=\"https://www.windy.com/54.063/-119.391?54.063,-119.391,10\">Windy</a>: wind at ridge height, animated.</li>\
 <li><a href=\"https://avalanche.ca/forecasts/north-rockies\">Avalanche Canada, North Rockies</a>: once the snow is down. Forecasts run in winter only.</li>\
 <li><a href=\"https://www.albertafirebans.ca/\">Alberta fire bans</a> and <a href=\"https://511.alberta.ca/\">511 Alberta</a> for Highway 40.</li></ul>");
 
-        let _ = write!(b, "<h2>Ten autumns at ridge height</h2><p>There is no weather station on Caw Ridge. What follows is the ERA5 reanalysis, a reconstruction of past weather from every observation available, read at the waypoint and adjusted to {:.0} m, for the autumns of {} to {}. It is a model of the past and smooths the extremes, the wind most of all.</p>", world.wpt_elev, clim.years.0, clim.years.1);
+        let _ = write!(b, "<h2>Ten autumns at ridge height</h2><p>There is no weather station on Caw Ridge. What follows is the ERA5 reanalysis, a reconstruction of past weather from every observation available, read at the ridge point and adjusted to {:.0} m, for the autumns of {} to {}. It is a model of the past and smooths the extremes, the wind most of all. At the waypoint, {} m lower, add about {:.0} degrees to every temperature.</p>", p.ridge_elev, clim.years.0, clim.years.1, chart::thousands(p.ridge_elev - world.wpt_elev), (p.ridge_elev - world.wpt_elev) * 0.0065);
         let spans: Vec<Span> = clim
             .weeks
             .iter()
@@ -1072,8 +1211,8 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             .collect();
         let _ = write!(
             b,
-            "<div class=\"viz\"><h3>Average daily range of temperature</h3><p class=\"sub\">Mean daily low to mean daily high by week, &deg;C, at {:.0} m</p>{}{}</div>",
-            world.wpt_elev,
+            "<div class=\"viz\"><h3>Average daily range of temperature</h3><p class=\"sub\">Mean daily low to mean daily high by week, &deg;C, at the ridge point, {:.0} m</p>{}{}</div>",
+            p.ridge_elev,
             chart::ranges("Average daily temperature range by week", &spans, "\u{b0}C", "Freezing"),
             chart::table("Show the numbers", &["Week of", "Mean high", "Mean low", "Warmest day", "Coldest night", "Days with new snow", "Days with rain or snow", "Wind km/h", "Gust km/h", "Top gust"], &rows)
         );
@@ -1103,13 +1242,18 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             pct(clim.rose.sectors[5].0 + clim.rose.sectors[6].0)
         );
 
-        b.push_str("<h2>When the snow comes</h2><p>Natural Resources Canada has read every clear Landsat and Sentinel-2 image of seven winters and worked out, for each 30 m cell in the country, when the snow arrived. At the waypoint:</p><div class=\"scroll\"><table><thead><tr><th>Winter</th><th>First snow period began</th><th>Known to within</th><th>Longest snow period began</th></tr></thead><tbody>");
+        b.push_str("<h2>When the snow comes</h2><p>Natural Resources Canada has read every clear Landsat and Sentinel-2 image of seven winters and worked out, for each 30 m cell in the country, when the snow arrived. At your two points:</p><div class=\"scroll\"><table><thead><tr><th>Winter</th><th>First snow at the waypoint</th><th>Known to within</th><th>First snow at the ridge point</th><th>Known to within</th></tr></thead><tbody>");
         for s in &p.snow {
-            let first = s.first.map(|f| (date_short(f.0), format!("{:.0} days either way", f.1), f.1)).unwrap_or(("No record".into(), String::new(), 99.0));
-            let weak = if first.2 > 15.0 { " <span class=\"tag\">Cloud gap</span>" } else { "" };
-            let _ = write!(b, "<tr><td>{}</td><td>{}{}</td><td>{}</td><td>{}</td></tr>", s.winter, first.0, weak, first.1, s.lasting.map(|l| { let (y, _, _) = sun::civil_from_days(l); format!("{} {}", date_short(l), y) }).unwrap_or_else(|| "No record".into()));
+            let cell = |f: Option<(i64, f32)>| -> (String, String) {
+                match f {
+                    Some((d, u)) => (format!("{}{}", date_short(d), if u > 15.0 { " <span class=\"tag\">Cloud gap</span>" } else { "" }), format!("{u:.0} days either way")),
+                    None => ("No record".to_string(), String::new()),
+                }
+            };
+            let (a, b2) = (cell(s.first), cell(s.ridge_first));
+            let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", s.winter, a.0, a.1, b2.0, b2.1);
         }
-        b.push_str("</tbody></table></div><p>A satellite sees the ground only between clouds, so each date is the midpoint between the last snow free view and the first white one. Where the gap was more than a fortnight the date is marked and should be set aside. In the winters with a good record, the first lasting snow at the waypoint came between 23 September and 21 October. On a windswept crest the snow also leaves again: the ridge can blow bare in a chinook and whiten the next night.</p>");
+        let _ = write!(b, "</tbody></table></div><p>A satellite sees the ground only between clouds, so each date is the midpoint between the last snow free view and the first white one. Where the gap was more than a fortnight the date is marked and should be set aside. In the winters with a good record the first snow came to the ridge point between {} and {}, and to the waypoint between {} and {}. In most of those winters the two dates fall within a week of each other: the first storm of the autumn whitens the valley and the ridge together. On a windswept crest the snow also leaves again: the ridge can blow bare in a chinook and whiten the next night.</p>", snow_ridge.0, snow_ridge.1, snow_wpt.0, snow_wpt.1);
         b.push_str(&map_figure(p, "ridge_snow", "The usual date of first snow across the ridge, from the winters with a good record."));
         b.push_str("<div class=\"notice\"><h3>Early season avalanches</h3><p>The first snows of autumn fall on bare, smooth tundra and rock and are moved about by wind into slabs on lee slopes. A slope of 30 to 45 degrees below a crest, loaded by a west wind, is where an October slab releases. The slope map shows where those angles are. If the snow is over your boots and the slope is steep, go around.</p></div>");
 
@@ -1145,7 +1289,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
 
     // -------------------------------------------------------------- safety
     {
-        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Safety</p><h1>Coming home</h1><p class=\"lede\">You will be two hours from a hospital on a good day, in grizzly country, above treeline in October, with no phone signal. None of that is a reason to stay home. All of it is a reason to prepare.</p></div>");
+        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Safety</p><h1>Coming home</h1><p class=\"lede\">You will be more than an hour of rough road from a hospital, in grizzly country, climbing above treeline in October, with no phone signal. None of that is a reason to stay home. All of it is a reason to prepare.</p></div>");
         b.push_str("<h2>In an emergency</h2><div class=\"phones\">\
 <div class=\"phone\"><div class=\"who\">Police, fire, ambulance, rescue</div><a class=\"num\" href=\"tel:911\">911</a><p>Search and rescue is sent by the RCMP. Give coordinates.</p></div>\
 <div class=\"phone\"><div class=\"who\">Grande Cache hospital</div><a class=\"num\" href=\"tel:17808273701\">780-827-3701</a><p>Community Health Complex, 10200 Shand Avenue. Emergency department open 24 hours.</p></div>\
@@ -1155,8 +1299,9 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         let u = geo::utm_string(config::WPT_LON, config::WPT_LAT);
         let _ = write!(
             b,
-            "<div class=\"notice\"><h3>What to tell them</h3><p>Say: <b>Caw Ridge, north-west of Grande Cache, off Beaverdam Road.</b> Then give a position. The waypoint is <span class=\"mono\">{:.5}, {:.5}</span>, or <span class=\"mono\">{}</span>. The nearest helicopter ambulance base is STARS at Grande Prairie. A two-way satellite messenger lets rescuers ask questions; a one-way beacon only shouts.</p></div>",
-            config::WPT_LAT, config::WPT_LON, u
+            "<div class=\"notice\"><h3>What to tell them</h3><p>Say: <b>Beaverdam Road, north-west of Grande Cache, at the Caw Ridge turnoff, about kilometre 30.</b> Then give a position. The waypoint is <span class=\"mono\">{:.5}, {:.5}</span>, or <span class=\"mono\">{}</span>. The ridge point is <span class=\"mono\">{:.5}, {:.5}</span>, or <span class=\"mono\">{}</span>. The nearest helicopter ambulance base is STARS at Grande Prairie. A two-way satellite messenger lets rescuers ask questions; a one-way beacon only shouts.</p></div>",
+            config::WPT_LAT, config::WPT_LON, u,
+            config::RIDGE_LAT, config::RIDGE_LON, geo::utm_string(config::RIDGE_LON, config::RIDGE_LAT)
         );
         b.push_str("<h2>Communications</h2><ul>\
 <li><b>Phone.</b> Coverage is confirmed in Grande Cache only. Assume none past the highway. A high point may catch a bar; do not plan on it.</li>\
@@ -1282,6 +1427,9 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     for m in &p.maps {
         all.push(m.view.clone());
         all.push(m.bare.clone());
+        if !m.id.starts_with("region") {
+            all.push(format!("maps/drape/{}.jpg", m.id));
+        }
     }
     all.push("data/cawridge.gpx".into());
     std::fs::write(out.join("offline.json"), serde_json::to_string(&all)?)?;

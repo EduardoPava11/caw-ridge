@@ -40,6 +40,8 @@ pub struct VantageOut {
     pub share: f32,
     pub dist_m: f64,
     pub bearing: f64,
+    /// Hours on foot from the waypoint, by the walking model.
+    pub walk_h: f32,
 }
 
 pub struct SummitOut {
@@ -69,10 +71,13 @@ pub struct SaddleOut {
     pub open: bool,
 }
 
+#[allow(dead_code)]
 pub struct SnowRow {
     pub winter: String,
     pub first: Option<(i64, f32)>,
     pub lasting: Option<i64>,
+    /// The same first snow date at the ridge point.
+    pub ridge_first: Option<(i64, f32)>,
 }
 
 pub struct Stats {
@@ -93,6 +98,16 @@ pub struct Stats {
     pub rim: (f32, f64, f64),
     /// Read from the official layers at the waypoint.
     pub wmu: String,
+    /// The other units, nearest first: name and number, distance in metres, bearing.
+    pub wmu_near: Vec<(String, f64, f64)>,
+    /// The commonest cover within 300 m of the waypoint, and whether most of it is open.
+    /// One cell would not do: the cell under a road reads as disturbed ground.
+    pub wpt_cover: String,
+    pub wpt_open: bool,
+    /// Ground in view from the ridge point, for comparison.
+    pub seen_km2_ridge: f32,
+    pub wpt_landform: String,
+    pub ridge_goat_sheep_range: bool,
     pub caribou_range: Option<String>,
     pub grizzly_core: bool,
     /// Share of the regional sheet inside the core grizzly zone.
@@ -102,6 +117,7 @@ pub struct Stats {
     pub park: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct Products {
     pub maps: Vec<MapOut>,
     pub vantages: Vec<VantageOut>,
@@ -112,6 +128,14 @@ pub struct Products {
     pub walk_profile: Profile,
     pub walk_out_h: f32,
     pub walk_back_h: f32,
+    /// From where the drive ends up to the end of the mapped track.
+    pub climb: Vec<Leg>,
+    pub climb_profile: Profile,
+    pub road_gap_m: f64,
+    /// Walking the whole way from the waypoint to the ridge point, and back down.
+    pub foot_up_h: f32,
+    pub foot_down_h: f32,
+    pub ridge_elev: f32,
     pub snow: Vec<SnowRow>,
     pub stats: Stats,
     pub summits: Vec<SummitOut>,
@@ -174,7 +198,7 @@ struct Saver<'a> {
 
 impl<'a> Saver<'a> {
     #[allow(clippy::too_many_arguments)]
-    fn save(&mut self, f: &Frame, id: &str, group: &'static str, title: &str, blurb: &str, sheet: &Raster, bare: &Raster, png: bool) -> Res<()> {
+    fn save(&mut self, f: &Frame, id: &str, group: &'static str, title: &str, blurb: &str, sheet: &Raster, bare: &Raster, drape: &Raster, png: bool) -> Res<()> {
         let view = format!("maps/{id}.jpg");
         let download = if png { format!("maps/{id}.png") } else { view.clone() };
         let b = format!("maps/bare/{id}.jpg");
@@ -187,6 +211,11 @@ impl<'a> Saver<'a> {
             // The thumbnail is cut from the map itself, without the collar, so it reads small.
             let tw = 720usize;
             bare.resized(tw, (tw as f32 * bare.h as f32 / bare.w as f32) as usize).save_jpg(&self.dir.join(format!("maps/thumb/{id}.jpg")), 82)?;
+            // The unlettered copy for the 3D ground, no larger than a phone can texture.
+            if f.sheet.level > 0 {
+                let dw = 2560usize.min(drape.w);
+                drape.resized(dw, (dw as f32 * drape.h as f32 / drape.w as f32) as usize).save_jpg(&self.dir.join(format!("maps/drape/{id}.jpg")), 80)?;
+            }
             // A middle size for the figures set into the pages.
             let mw = 1600usize.min(bare.w);
             bare.resized(mw, (mw as f32 * bare.h as f32 / bare.w as f32) as usize).save_jpg(&self.dir.join(format!("maps/mid/{id}.jpg")), 84)?;
@@ -211,7 +240,7 @@ impl<'a> Saver<'a> {
 fn none(_: &mut Svg, _: &Frame, _: &mut Placer) {}
 
 pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
-    for d in ["maps", "maps/bare", "maps/thumb", "maps/mid", "data/terrain"] {
+    for d in ["maps", "maps/bare", "maps/thumb", "maps/mid", "maps/drape", "data/terrain"] {
         std::fs::create_dir_all(out.join(d))?;
     }
     let ra = &world.ra;
@@ -231,20 +260,37 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
 
     // ------------------------------------------------------------ the drive
     eprintln!("routing the drive");
-    let mut track_end = (config::WPT_LON, config::WPT_LAT);
-    let mut best = f64::MAX;
-    for f in world.osm.iter().filter(|f| route::kind_of(f).is_some()) {
-        if let Geom::Line(pts) = &f.geom {
-            for p in pts {
-                let d = geo::haversine(p.0, p.1, config::WPT_LON, config::WPT_LAT);
-                if d < best {
-                    best = d;
-                    track_end = *p;
+    let nearest_node = |lon: f64, lat: f64| -> ((f64, f64), f64) {
+        let mut best = ((lon, lat), f64::MAX);
+        for f in world.osm.iter().filter(|f| route::kind_of(f).is_some()) {
+            if let Geom::Line(pts) = &f.geom {
+                for p in pts {
+                    let d = geo::haversine(p.0, p.1, lon, lat);
+                    if d < best.1 {
+                        best = (*p, d);
+                    }
                 }
             }
         }
+        best
+    };
+    // The drive ends where the road comes nearest the waypoint. The mapped track ends
+    // where it comes nearest the ridge point; between the two is the climb.
+    let (road_end, road_gap_m) = nearest_node(config::WPT_LON, config::WPT_LAT);
+    let (track_end, _) = nearest_node(config::RIDGE_LON, config::RIDGE_LAT);
+    let mut climb: Vec<Leg> = Vec::new();
+    for l in route::drive(&world.osm, road_end, track_end).unwrap_or_default() {
+        match climb.last_mut() {
+            Some(prev) if prev.kind == l.kind => {
+                prev.pts.extend(l.pts.into_iter().skip(1));
+                prev.km += l.km;
+            }
+            _ => climb.push(l),
+        }
     }
-    let raw = route::drive(&world.osm, config::TOWN, track_end).ok_or("no drivable route found in the road data")?;
+    let climb_line: Vec<(f64, f64)> = climb.iter().flat_map(|l| l.pts.clone()).collect();
+    let climb_profile = route::profile(&world.dem, &climb_line, 25.0, 150.0);
+    let raw = route::drive(&world.osm, config::TOWN, road_end).ok_or("no drivable route found in the road data")?;
     // Fold the few blocks of town streets into one leg, and join legs of the same kind.
     let first_long = raw.iter().position(|l| l.kind == "highway" && l.km >= 3.0).unwrap_or(0);
     let mut drive: Vec<Leg> = Vec::new();
@@ -260,9 +306,10 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
     }
     let drive_line: Vec<(f64, f64)> = drive.iter().flat_map(|l| l.pts.clone()).collect();
     let drive_profile = route::profile(&world.dem, &drive_line, 40.0, 400.0);
-    for l in &drive {
+    for l in drive.iter().chain(climb.iter()) {
         eprintln!("  {:>8} {:>6.1} km  {}", l.kind, l.km, l.name);
     }
+    eprintln!("  the road passes {road_gap_m:.0} m from the waypoint");
 
     // ------------------------------------------------------------- walking
     eprintln!("walking times");
@@ -283,7 +330,12 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         }
     }
     let (t_out, _) = analysis::travel_time(rt, ridge_win, (wxi, wyi), &factor, false);
-    let (t_in, prev_in) = analysis::travel_time(rt, ridge_win, (wxi, wyi), &factor, true);
+    let (t_in, _) = analysis::travel_time(rt, ridge_win, (wxi, wyi), &factor, true);
+    // The same two fields about the ridge point, for the walk from the end of the track.
+    let (rx, ry) = ra.px(config::RIDGE_LON, config::RIDGE_LAT);
+    let rcell = ry as usize * ra.w + rx as usize;
+    let (r_out, _) = analysis::travel_time(rt, ridge_win, (rx as usize, ry as usize), &factor, false);
+    let (r_in, prev_in) = analysis::travel_time(rt, ridge_win, (rx as usize, ry as usize), &factor, true);
     let (tx, ty) = ra.px(track_end.0, track_end.1);
     let tcell = ty as usize * ra.w + tx as usize;
     let mut walk = vec![track_end];
@@ -292,9 +344,12 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         c = prev_in[c] as usize;
         walk.push(ra.lonlat((c % ra.w) as f64 + 0.5, (c / ra.w) as f64 + 0.5));
     }
-    walk.push((config::WPT_LON, config::WPT_LAT));
+    walk.push((config::RIDGE_LON, config::RIDGE_LAT));
     let walk_profile = route::profile(&world.dem, &walk, 20.0, 100.0);
-    let (walk_out_h, walk_back_h) = (t_in[tcell], t_out[tcell]);
+    let (walk_out_h, walk_back_h) = (r_in[tcell], r_out[tcell]);
+    // On foot the whole way between the waypoint and the ridge point.
+    let (foot_up_h, foot_down_h) = (t_out[rcell], t_in[rcell]);
+    let ridge_elev = world.dem.sample(config::RIDGE_LON, config::RIDGE_LAT);
 
     // ------------------------------------------------------------ the sun
     eprintln!("sun on {:?}", config::SUN_DATE);
@@ -326,7 +381,7 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         .map(|v| (v.x, v.y, v.elev, v.seen_km2, v.share))
         .collect();
     ranked.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
-    ranked.truncate(60);
+    ranked.truncate(160);
     let open_seen = |x: usize, y: usize| -> (f32, f32) {
         let cell = rt.cell[y];
         let r = (3000.0 / cell) as i64;
@@ -378,6 +433,7 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
                 share: v.4,
                 dist_m: geo::haversine(config::WPT_LON, config::WPT_LAT, lon, lat),
                 bearing: geo::bearing(config::WPT_LON, config::WPT_LAT, lon, lat),
+                walk_h: t_out[v.1 * ra.w + v.0],
             }
         })
         .collect();
@@ -502,10 +558,13 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let f = first.nearest(config::WPT_LON, config::WPT_LAT);
         let u = unc.nearest(config::WPT_LON, config::WPT_LAT);
         let l = lasting.nearest(config::WPT_LON, config::WPT_LAT);
+        let rf = first.nearest(config::RIDGE_LON, config::RIDGE_LAT);
+        let ru = unc.nearest(config::RIDGE_LON, config::RIDGE_LAT);
         snow_rows.push(SnowRow {
             winter: format!("{}-{}", y1, y1 + 1),
             first: if f.is_nan() { None } else { Some((base + f as i64, u)) },
             lasting: if l.is_nan() { None } else { Some(base + l as i64) },
+            ridge_first: if rf.is_nan() { None } else { Some((base + rf as i64, ru)) },
         });
     }
     // Median first snow day (as a day of the autumn, days after 31 August) per cell.
@@ -545,6 +604,13 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
             zmin = zmin.min(rt.z[i]);
             zmax = zmax.max(rt.z[i]);
             total += a;
+        }
+    }
+    // The upper edge of the forest is read over the whole sheet, since the waypoint
+    // itself may stand far below it.
+    for y in close_win.1..close_win.3 {
+        for x in close_win.0..close_win.2 {
+            let i = y * ra.w + x;
             if matches!(cover[i] as i32, 1 | 2 | 6) {
                 tree_z.push(rt.z[i]);
             }
@@ -605,7 +671,43 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
             }
         }
     }
+    let mut wmu_near: Vec<(String, f64, f64)> = Vec::new();
+    for f in &world.wmu {
+        if let Geom::Poly(rings) = &f.geom {
+            if crate::vector::in_poly(rings, config::WPT_LON, config::WPT_LAT) {
+                continue;
+            }
+            let e = rings.iter().map(|r| crate::vector::nearest_on(r, config::WPT_LON, config::WPT_LAT)).fold((f64::MAX, 0.0, (0.0, 0.0)), |a, c| if c.0 < a.0 { c } else { a });
+            wmu_near.push((format!("WMU {} ({})", f.get("WMUNIT_CODE").trim_start_matches('0'), f.get("WMUNIT_NAME")), e.0, e.1));
+        }
+    }
+    wmu_near.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let mut about: std::collections::BTreeMap<&'static str, u32> = Default::default();
+    let (mut open_n, mut all_n) = (0u32, 0u32);
+    let r300 = (300.0 / rt.cell[wyi]) as i64;
+    for dy in -r300..=r300 {
+        for dx in -r300..=r300 {
+            if dx * dx + dy * dy > r300 * r300 {
+                continue;
+            }
+            let c = cover[(wyi as i64 + dy) as usize * ra.w + (wxi as i64 + dx) as usize];
+            *about.entry(cover_name(c as i32)).or_default() += 1;
+            all_n += 1;
+            if is_open(c) {
+                open_n += 1;
+            }
+        }
+    }
+    let wpt_cover = about.iter().max_by_key(|a| *a.1).map(|a| a.0.to_string()).unwrap_or_default();
+    let view_ridge = analysis::viewshed(rt, rx as f32 - 0.5, ry as f32 - 0.5, config::EYE_M, config::ANIMAL_M, 8000.0);
+    let seen_km2_ridge = view_ridge.iter().filter(|v| !v.is_nan()).sum::<f32>() * cell_km2;
     let stats = Stats {
+        wmu_near,
+        wpt_cover,
+        wpt_open: open_n * 2 >= all_n,
+        seen_km2_ridge,
+        wpt_landform: analysis::LANDFORMS[landform[wi] as usize].0.to_string(),
+        ridge_goat_sheep_range: world.goat_sheep.iter().any(|f| matches!(&f.geom, Geom::Poly(r) if crate::vector::in_poly(r, config::RIDGE_LON, config::RIDGE_LAT))),
         wmu: here(&world.wmu).map(|f| format!("{} {}", f.get("WMUNIT_CODE").trim_start_matches('0'), f.get("WMUNIT_NAME"))).unwrap_or_default(),
         caribou_range: here(&world.caribou).map(|f| f.get("SUBUNIT").to_string()),
         grizzly_core: here(&world.grizzly).is_some(),
@@ -786,7 +888,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: "Grande Cache to Caw Ridge", subtitle: "Regional topographic map", notes: &["The waypoint is in Wildlife Management Unit 446, Kakwa River."], legend: maps::legend_topo(), credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &none, Some(&collar))?;
         let bare = f.compose(&base, &ov, &none, None)?;
-        sv.save(&f, "region_topo", "Topographic", "Region: Grande Cache to Caw Ridge", "The whole approach on one sheet: Highway 40, Beaverdam Road, the ridge, the parks and the wildlife management units. Contours every 100 m.", &sheet, &bare, true)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, "region_topo", "Topographic", "Region: Grande Cache to Caw Ridge", "The whole approach on one sheet: Highway 40, Beaverdam Road, the ridge, the parks and the wildlife management units. Contours every 100 m.", &sheet, &bare, &drape, true)?;
 
         let sat = f.base_sat(0, 0.35);
         let mut ov = Overlay::thematic();
@@ -797,7 +900,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: "Grande Cache to Caw Ridge", subtitle: &sub, notes: &["Pale patches in the forest are cutblocks and well sites. Grey scars north of town are the coal mines."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&sat, &ov, &none, Some(&collar))?;
         let bare = f.compose(&sat, &ov, &none, None)?;
-        sv.save(&f, "region_sat", "Satellite", "Region from space", &format!("A cloud free pass on {}. Roads, boundaries and names drawn over the image.", &world.sat_region.date[..10]), &sheet, &bare, false)?;
+        let drape = f.compose(&sat, &ov.drape(), &none, None)?;
+        sv.save(&f, "region_sat", "Satellite", "Region from space", &format!("A cloud free pass on {}. Roads, boundaries and names drawn over the image.", &world.sat_region.date[..10]), &sheet, &bare, &drape, false)?;
 
         let grey = f.base_topo();
         let mut ov = Overlay::topo();
@@ -822,7 +926,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         };
         let sheet = f.compose(&grey, &ov, &none, Some(&collar))?;
         let bare = f.compose(&grey, &ov, &none, None)?;
-        sv.save(&f, "region_wildlife", "Wildlife and land", "Wildlife ranges", "Where the province maps mountain goat and bighorn sheep range and the caribou ranges. Hatched purple is goat and sheep ground; hatched orange is caribou range.", &sheet, &bare, false)?;
+        let drape = f.compose(&grey, &ov.drape(), &none, None)?;
+        sv.save(&f, "region_wildlife", "Wildlife and land", "Wildlife ranges", "Where the province maps mountain goat and bighorn sheep range and the caribou ranges. Hatched purple is goat and sheep ground; hatched orange is caribou range.", &sheet, &bare, &drape, false)?;
 
         let mut ov = Overlay::topo();
         ov.coal = true;
@@ -841,7 +946,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         };
         let sheet = f.compose(&grey, &ov, &none, Some(&collar))?;
         let bare = f.compose(&grey, &ov, &none, None)?;
-        sv.save(&f, "region_coal", "Wildlife and land", "Coal leases and mine roads", "The waypoint sits inside an active Crown coal lease. This sheet shows every coal agreement in the region and the mine roads you must stay off.", &sheet, &bare, false)?;
+        let drape = f.compose(&grey, &ov.drape(), &none, None)?;
+        sv.save(&f, "region_coal", "Wildlife and land", "Coal leases and mine roads", "The waypoint sits inside an active Crown coal lease. This sheet shows every coal agreement in the region and the mine roads you must stay off.", &sheet, &bare, &drape, false)?;
     }
 
     // Ridge, printed large.
@@ -852,7 +958,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: "Caw Ridge", subtitle: "Topographic map", notes: &["The red dotted line is a computed walking line, not a trail."], legend: maps::legend_topo(), credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &route_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &route_extra, None)?;
-        sv.save(&f, "ridge_topo", "Topographic", "Caw Ridge", "The ridge and the roads that reach it, with 20 m contours, a 1 km UTM grid, streams traced from the elevation model and the ground cover as a tint.", &sheet, &bare, true)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, "ridge_topo", "Topographic", "Caw Ridge", "The ridge and the roads that reach it, with 20 m contours, a 1 km UTM grid, streams traced from the elevation model and the ground cover as a tint.", &sheet, &bare, &drape, true)?;
     }
     // Close in, printed large.
     {
@@ -865,17 +972,18 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         };
         let mut legend = maps::legend_topo();
         legend.insert(0, LegendItem { swatch: "<path d=\"M19 -7L26 0L19 7L12 0Z\" fill=\"#ffd21f\" stroke=\"#1d1d1b\" stroke-width=\"1.6\"/>".into(), label: "Glassing point (G1 is best)".into() });
-        let collar = Collar { title: "Caw Ridge: the waypoint", subtitle: "Topographic map, 10 m contours", notes: &["Contours are interpolated from 30 m data: small cliffs and benches will not show.", "The red dotted line is a computed walking line, not a trail."], legend, credits: &maps::CREDITS };
+        let collar = Collar { title: "Caw Ridge: waypoint and ridge", subtitle: "Topographic map, 10 m contours", notes: &["Contours are interpolated from 30 m data: small cliffs and benches will not show.", "The red dotted line is a computed walking line, not a trail."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &both, Some(&collar))?;
         let bare = f.compose(&base, &ov, &both, None)?;
-        sv.save(&f, "close_topo", "Topographic", "Around the waypoint", "The ground within a morning's walk, with 10 m contours, the computed glassing points and the walking line from the end of the mapped track.", &sheet, &bare, true)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, "close_topo", "Topographic", "Waypoint and ridge", "The waypoint in the valley, the ridge above it and the old road between them, with 10 m contours, the computed glassing points and the walking line from the end of the mapped track.", &sheet, &bare, &drape, true)?;
     }
 
     // Thematic sheets, one pixel per grid cell.
     for (sheet_def, prefix) in [(Sheet { scale: 1.0, ..maps::RIDGE }, "ridge"), (Sheet { scale: 1.0, ..maps::CLOSE }, "close")] {
         let f = Frame::new(world, &sheet_def);
         let close = prefix == "close";
-        let place = if close { "Around the waypoint" } else { "Caw Ridge" };
+        let place = if close { "Waypoint and ridge" } else { "Caw Ridge" };
         let ov = Overlay::thematic();
 
         if !close && !maps::DRY.load(std::sync::atomic::Ordering::Relaxed) {
@@ -896,7 +1004,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
             let collar = Collar { title: place, subtitle: &sub, notes: &[note], legend: maps::legend_topo().into_iter().take(6).collect(), credits: &maps::CREDITS };
             let sheet = f.compose(&base, &ovs, &none, Some(&collar))?;
             let bare = f.compose(&base, &ovs, &none, None)?;
-            sv.save(&f, &format!("{prefix}_{id}"), "Satellite", &format!("{place} {name}"), &format!("{blurb} Pass of {}.", &world.sat_ridge.date[..10]), &sheet, &bare, false)?;
+            let drape = f.compose(&base, &ovs.drape(), &none, None)?;
+            sv.save(&f, &format!("{prefix}_{id}"), "Satellite", &format!("{place} {name}"), &format!("{blurb} Pass of {}.", &world.sat_ridge.date[..10]), &sheet, &bare, &drape, false)?;
         }
 
         // Slope.
@@ -909,7 +1018,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Slope angle", notes: &["From 30 m data: slopes read low on short cliffs and gullies. Treat every colour as a minimum.", "Goats and sheep stay close to ground over 40\u{b0}. Early snow on 30 to 45\u{b0} lee slopes can avalanche."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &vantage_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &vantage_extra, None)?;
-        sv.save(&f, &format!("{prefix}_slope"), "Terrain", &format!("{place}: slope angle"), "How steep the ground is. Pale is easy, green is steady walking, yellow and orange are steep, red and purple are escape terrain.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_slope"), "Terrain", &format!("{place}: slope angle"), "How steep the ground is. Pale is easy, green is steady walking, yellow and orange are steep, red and purple are escape terrain.", &sheet, &bare, &drape, false)?;
 
         // Aspect.
         let aspect_cols = ["#2c5aa0", "#3f93c0", "#5fbf8f", "#c4d44a", "#f5b53f", "#ef7a3a", "#c4508f", "#6f4fa8"];
@@ -924,7 +1034,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Aspect: which way the slope faces", notes: &["South and south-west slopes (orange) warm first and melt first. North slopes (blue) hold snow and shade.", "Morning thermals rise on sunlit slopes; evening air drains down the shaded ones."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &none, Some(&collar))?;
         let bare = f.compose(&base, &ov, &none, None)?;
-        sv.save(&f, &format!("{prefix}_aspect"), "Terrain", &format!("{place}: aspect"), "Which way each slope faces. Warm colours face the sun; cool colours face away. Use it with the wind to plan an approach.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_aspect"), "Terrain", &format!("{place}: aspect"), "Which way each slope faces. Warm colours face the sun; cool colours face away. Use it with the wind to plan an approach.", &sheet, &bare, &drape, false)?;
 
         // Ground cover.
         let base = f.base_value(0.80, |lon, lat, _| {
@@ -936,7 +1047,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Ground cover, 2020 Land Cover of Canada", notes: &[&tl, "A 30 m satellite classification from 2020: burns, cutblocks and mine work since then will not show."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &none, Some(&collar))?;
         let bare = f.compose(&base, &ov, &none, None)?;
-        sv.save(&f, &format!("{prefix}_cover"), "Terrain", &format!("{place}: ground cover"), "Timber, shrub, alpine tundra and rock from the national land cover. The edges between timber and open ground are where to look at first and last light.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_cover"), "Terrain", &format!("{place}: ground cover"), "Timber, shrub, alpine tundra and rock from the national land cover. The edges between timber and open ground are where to look at first and last light.", &sheet, &bare, &drape, false)?;
 
         // First sun.
         let sr = samples.first().map(|s| s.0).unwrap_or(8.0);
@@ -960,7 +1072,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: &sd, notes: &["Shadows cast by the surrounding terrain are included. Cloud is not.", "Sunrise moves about two minutes later each day through October."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &none, Some(&collar))?;
         let bare = f.compose(&base, &ov, &none, None)?;
-        sv.save(&f, &format!("{prefix}_sunrise"), "Sun and snow", &format!("{place}: first sun"), "When direct sunlight first reaches each piece of ground on an early October morning, with the shadows of the surrounding ridges counted.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_sunrise"), "Sun and snow", &format!("{place}: first sun"), "When direct sunlight first reaches each piece of ground on an early October morning, with the shadows of the surrounding ridges counted.", &sheet, &bare, &drape, false)?;
 
         // Hours of sun.
         let hours_ramp = Ramp::new(&[(0.0, "#1b1b3a"), (2.0, "#3b3f8f"), (4.0, "#7a4fa3"), (6.0, "#c8567f"), (8.0, "#f08a4b"), (10.0, "#fbd25a")]);
@@ -973,7 +1086,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: &sd, notes: &["Dark ground stays cold, holds frost and keeps the first snow. Bright ground dries and melts first."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &none, Some(&collar))?;
         let bare = f.compose(&base, &ov, &none, None)?;
-        sv.save(&f, &format!("{prefix}_sunhours"), "Sun and snow", &format!("{place}: hours of sun"), "How many hours of direct sun each slope gets on an early October day. It shows where snow and frost linger and where the ground dries.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_sunhours"), "Sun and snow", &format!("{place}: hours of sun"), "How many hours of direct sun each slope gets on an early October day. It shows where snow and frost linger and where the ground dries.", &sheet, &bare, &drape, false)?;
 
         // First snow.
         let snow_ramp = Ramp::new(&[(0.0, "#3b1053"), (15.0, "#6a2a8a"), (30.0, "#2f5fa8"), (45.0, "#4fa3c8"), (61.0, "#a8dbc0"), (76.0, "#eef3b8")]);
@@ -982,7 +1096,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Usual date of the first snow that stays a while", notes: &["Median over the seven winters 2018 to 2025, read from Landsat and Sentinel-2 by Natural Resources Canada.", "Dates are good to about a week: satellites only see the ground between clouds."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &none, Some(&collar))?;
         let bare = f.compose(&base, &ov, &none, None)?;
-        sv.save(&f, &format!("{prefix}_snow"), "Sun and snow", &format!("{place}: first snow"), "The usual start of the first snow period of the autumn, from seven winters of satellite records. The ridge top whitens weeks before the valleys.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_snow"), "Sun and snow", &format!("{place}: first snow"), "The usual start of the first snow period of the autumn, from seven winters of satellite records. The ridge top whitens weeks before the valleys.", &sheet, &bare, &drape, false)?;
 
         // Walking time.
         let time_ramp = Ramp::new(&[(0.0, "#1a9850"), (0.5, "#66bd63"), (1.0, "#b8e186"), (1.5, "#fee08b"), (2.0, "#fdae61"), (3.0, "#f46d43"), (4.0, "#d73027"), (5.0, "#8e0152"), (6.0, "#40004b")]);
@@ -994,7 +1109,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Walking time out from the waypoint", notes: &["Tobler's hiking function: full speed on roads and tracks, three fifths of it off them.", "No pack, snow, deadfall, willow or creek is counted. Walking back up takes longer. Allow half as much again."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &route_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &route_extra, None)?;
-        sv.save(&f, &format!("{prefix}_walk"), "Terrain", &format!("{place}: walking time"), "How long it takes to walk from the waypoint to anywhere on the sheet, from slope alone. Use it to judge how far a pack-out would be.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_walk"), "Terrain", &format!("{place}: walking time"), "How long it takes to walk from the waypoint to anywhere on the sheet, from slope alone. Use it to judge how far a pack-out would be.", &sheet, &bare, &drape, false)?;
 
         // Viewshed from the waypoint.
         let base = f.base_value(0.62, |lon, lat, _| {
@@ -1010,7 +1126,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "What can be seen from the waypoint", notes: &[&note, "Eye at 1.7 m, animal back at 1.0 m, bare ground: trees hide more than this shows. It also shows where you are skylined."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &vantage_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &vantage_extra, None)?;
-        sv.save(&f, &format!("{prefix}_view"), "Glassing", &format!("{place}: in view from the waypoint"), "Every piece of ground a standing person can see from the waypoint, and every piece that is hidden. What you can see can see you.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_view"), "Glassing", &format!("{place}: in view from the waypoint"), "Every piece of ground a standing person can see from the waypoint, and every piece that is hidden. What you can see can see you.", &sheet, &bare, &drape, false)?;
 
         // Vantage points.
         let count_ramp = Ramp::new(&[(0.0, "#3a3f55"), (1.0, "#4f8fc0"), (2.0, "#6cc08b"), (3.0, "#d9e04a"), (5.0, "#ffb02e")]);
@@ -1027,7 +1144,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Glassing points and the ground they cover", notes: &["Points are ranked by the open ground in view between 300 m and 3 km.", "Dark ground is dead ground: nothing sees into it. Animals bed there, and you can move there unseen."], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &vantage_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &vantage_extra, None)?;
-        sv.save(&f, &format!("{prefix}_glass"), "Glassing", &format!("{place}: glassing points"), "The eight best places to sit behind glass, found by testing hundreds of spots for how much open ground each one sees, and the ground they cover between them.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_glass"), "Glassing", &format!("{place}: glassing points"), "The eight best places to sit behind glass, found by testing hundreds of spots for how much open ground each one sees, and the ground they cover between them.", &sheet, &bare, &drape, false)?;
         let _ = &score_grid;
 
         // Landforms, with the saddles and summits.
@@ -1055,7 +1173,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         };
         let sheet = f.compose(&base, &ov, &landform_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &landform_extra, None)?;
-        sv.save(&f, &format!("{prefix}_landform"), "Terrain", &format!("{place}: landforms and saddles"), "The shape of the ground sorted into crests, spurs, benches, basins, draws and gullies, with every saddle and summit marked. Saddles are where animals cross a ridge.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_landform"), "Terrain", &format!("{place}: landforms and saddles"), "The shape of the ground sorted into crests, spurs, benches, basins, draws and gullies, with every saddle and summit marked. Saddles are where animals cross a ridge.", &sheet, &bare, &drape, false)?;
 
         // Wind shelter.
         let shelter_ramp = Ramp::new(&[(-90.0, "#184f95"), (-10.0, "#3987e5"), (-5.0, "#9ec5f4"), (-2.0, "#f0efec"), (2.0, "#f6c9a8"), (5.0, "#eb6834"), (10.0, "#9c3a12")]);
@@ -1082,7 +1201,8 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         };
         let sheet = f.compose(&base, &ov, &vantage_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &vantage_extra, None)?;
-        sv.save(&f, &format!("{prefix}_shelter"), "Terrain", &format!("{place}: wind shelter"), "Where the prevailing wind strikes and where the ground gives shelter from it. Animals bed in the lee in a blow; snow drifts there too.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_shelter"), "Terrain", &format!("{place}: wind shelter"), "Where the prevailing wind strikes and where the ground gives shelter from it. Animals bed in the lee in a blow; snow drifts there too.", &sheet, &bare, &drape, false)?;
 
         // Height, as layer tints.
         let tint = Ramp::new(&[(800.0, "#6fa86a"), (1100.0, "#9dc37c"), (1400.0, "#cfdc96"), (1600.0, "#f0e6a4"), (1800.0, "#e8c987"), (1900.0, "#d9a871"), (2000.0, "#c48a62"), (2100.0, "#b39a8c"), (2200.0, "#d8d2cc"), (2400.0, "#ffffff")]);
@@ -1097,8 +1217,9 @@ pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
         let collar = Collar { title: place, subtitle: "Height above sea level", notes: &[&tl], legend, credits: &maps::CREDITS };
         let sheet = f.compose(&base, &ov, &landform_extra, Some(&collar))?;
         let bare = f.compose(&base, &ov, &landform_extra, None)?;
-        sv.save(&f, &format!("{prefix}_height"), "Terrain", &format!("{place}: height"), "Height shown as bands of colour, 100 m to the band, with the summits and saddles marked. The quickest way to see what is above you and what is below.", &sheet, &bare, false)?;
+        let drape = f.compose(&base, &ov.drape(), &none, None)?;
+        sv.save(&f, &format!("{prefix}_height"), "Terrain", &format!("{place}: height"), "Height shown as bands of colour, 100 m to the band, with the summits and saddles marked. The quickest way to see what is above you and what is below.", &sheet, &bare, &drape, false)?;
     }
 
-    Ok(Products { maps: sv.maps, vantages, drive, drive_profile, track_end, walk, walk_profile, walk_out_h, walk_back_h, snow: snow_rows, stats, summits, saddles, bands, aspects, landform_share, wind_from, grids })
+    Ok(Products { maps: sv.maps, vantages, drive, drive_profile, track_end, walk, walk_profile, walk_out_h, walk_back_h, climb, climb_profile, road_gap_m, foot_up_h, foot_down_h, ridge_elev, snow: snow_rows, stats, summits, saddles, bands, aspects, landform_share, wind_from, grids })
 }

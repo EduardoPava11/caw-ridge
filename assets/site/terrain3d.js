@@ -81,7 +81,8 @@ function setupArea(name) {
   const mid = (b.s + b.n) / 2 * Math.PI / 180;
   const W = R * (b.e - b.w) * Math.PI / 180 * Math.cos(mid);
   const H = R * (T.merc(b.n) - T.merc(b.s)) * Math.cos(mid);
-  const step = Math.max(1, Math.round(Math.sqrt(g.w * g.h / 330000)));
+  // About a quarter of a million vertices: all a 30 m model can use, and light on a phone.
+  const step = Math.max(1, Math.ceil(Math.sqrt(g.w * g.h / 260000)));
   const nx = Math.floor((g.w - 1) / step) + 1, ny = Math.floor((g.h - 1) / step) + 1;
   const pos = new Float32Array(nx * ny * 3), uv = new Float32Array(nx * ny * 2);
   let lo = 1e9, hi = -1e9;
@@ -229,6 +230,7 @@ function label(text, fill, ink, shape) {
 }
 const STYLE = {
   waypoint: ["#d7261e", "#ffffff", "dot"],
+  ridge: ["#ffffff", "#d7261e", "dot"],
   glassing: ["#ffd21f", "#1d1d1b", "diamond"],
   summit: ["#fbf8ef", "#1d1d1b", "triangle"],
   saddle: ["#1d1d1b", "#fbf8ef", "gap"],
@@ -243,7 +245,7 @@ function placeMarks() {
   document.querySelectorAll("[data-show]").forEach((el) => { on[el.getAttribute("data-show")] = el.checked; });
   C.places.forEach((p) => {
     if (!inside(p.lat, p.lon)) { return; }
-    const group = p.kind === "summit" || p.kind === "saddle" ? "shape" : (p.kind === "waypoint" || p.kind === "glassing" ? "points" : "other");
+    const group = p.kind === "summit" || p.kind === "saddle" ? "shape" : (p.kind === "waypoint" || p.kind === "ridge" || p.kind === "glassing" ? "points" : "other");
     if (on[group] === false) { return; }
     const st = STYLE[p.kind] || STYLE.road;
     const s = label(p.short || p.name, st[0], st[1], st[2]);
@@ -282,7 +284,7 @@ function addLine(pts, kind) {
 }
 
 // Where labels would sit on top of one another, the more important one is kept.
-const RANK = { waypoint: 0, glassing: 1, saddle: 2, summit: 3, road: 4, camp: 5, service: 6 };
+const RANK = { waypoint: 0, ridge: 0, glassing: 1, saddle: 2, summit: 3, road: 4, camp: 5, service: 6 };
 function declutter() {
   const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight;
   const v = new THREE.Vector3();
@@ -521,7 +523,7 @@ function stand(lat, lon) {
   if (!state.stand) {
     state.savedExag = state.exag;
     state.savedView = { p: camera.position.clone(), t: controls.target.clone(), fov: camera.fov, layer: state.layer };
-    // The drawn maps carry symbols that swell underfoot, so stand on the satellite image.
+    // Contour lines a metre wide make poor ground to stand on: use the satellite image.
     const sat = C.layers.findIndex((l) => l.id === "sat");
     if (sat >= 0 && C.layers[state.layer].id === "topo") { $("#layer").value = sat; loadLayer(sat); }
     // Look the way the camera was already looking.

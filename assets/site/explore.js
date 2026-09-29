@@ -41,11 +41,11 @@
     return box;
   }
   var groups = { "Waypoint and glassing points": L.layerGroup(), "Saddles and summits": L.layerGroup(), "Roads, camps and services": L.layerGroup(), "Drive and walking line": L.layerGroup() };
-  var PIN = { waypoint: "", glassing: "g", camp: "c", summit: "t", saddle: "p" };
+  var PIN = { waypoint: "", ridge: "r", glassing: "g", camp: "c", summit: "t", saddle: "p" };
   window.CAW.places.forEach(function (p) {
     var cls = PIN[p.kind] === undefined ? "s" : PIN[p.kind];
     var m = L.marker([p.lat, p.lon], { icon: icon(cls), title: p.name, zIndexOffset: p.kind === "waypoint" ? 1000 : 0 }).bindPopup(popup(p));
-    var g = p.kind === "waypoint" || p.kind === "glassing" ? "Waypoint and glassing points" : (p.kind === "summit" || p.kind === "saddle" ? "Saddles and summits" : "Roads, camps and services");
+    var g = p.kind === "waypoint" || p.kind === "ridge" || p.kind === "glassing" ? "Waypoint and glassing points" : (p.kind === "summit" || p.kind === "saddle" ? "Saddles and summits" : "Roads, camps and services");
     m.on("click", function () { describe(p.name, p.lat, p.lon); });
     m.addTo(groups[g]);
   });
@@ -68,7 +68,7 @@
   groups["Roads, camps and services"].addTo(map);
   L.control.layers(bases, groups, { collapsed: window.innerWidth < 900, position: "topright" }).addTo(map);
   L.control.scale({ imperial: false, maxWidth: 160 }).addTo(map);
-  map.fitBounds([[54.02, -119.47], [54.105, -119.31]]);
+  map.fitBounds(window.CAW.start);
 
   // What is known about a point, in the panel at the bottom left.
   var box = document.querySelector("#info"), wrap = document.querySelector("#infowrap");

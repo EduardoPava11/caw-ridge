@@ -1,4 +1,5 @@
 /target
 /out
 /data/cache
+/docs
 .DS_Store

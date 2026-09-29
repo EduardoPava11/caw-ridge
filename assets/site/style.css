@@ -299,6 +299,7 @@ footer a { color: var(--ink-2); }
 .pin.s { background: #1d1d1b; width: 14px; height: 14px; border-width: 2px; }
 .pin.c { background: #1f6a30; width: 14px; height: 14px; border-width: 2px; }
 .pin.me { background: #2a78d6; }
+.pin.r { background: #ffffff; border-color: #a5150f; width: 18px; height: 18px; margin: 2px; }
 .pin.t { width: 0; height: 0; border-radius: 0; background: none; border: 8px solid transparent; border-bottom: 14px solid #1d1d1b; border-top: 0; box-shadow: none; filter: drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 1.5px #fff); margin: 3px; }
 .pin.p { width: 18px; height: 18px; border-radius: 50%; background: #fbf8ef; border: 2px solid #1d1d1b; position: relative; margin: 2px; }
 .pin.p::after { content: ""; position: absolute; left: 3px; right: 3px; top: 6px; height: 2px; background: #1d1d1b; }

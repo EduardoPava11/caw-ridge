@@ -114,29 +114,30 @@
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) { e.className = cls; } if (text !== undefined) { e.textContent = text; } return e; }
   function liveForecast() {
-    var box = document.querySelector("[data-forecast]");
-    if (!box || !window.fetch) { return; }
-    fetch(box.getAttribute("data-forecast")).then(function (r) { return r.json(); }).then(function (j) {
-      var d = j.daily;
-      if (!d || !d.time) { return; }
-      box.textContent = "";
-      d.time.forEach(function (t, i) {
-        var p = t.split("-").map(Number);
-        var date = new Date(Date.UTC(p[0], p[1] - 1, p[2]));
-        var cell = el("div");
-        cell.appendChild(el("div", "d", DAYS[date.getUTCDay()] + " " + p[2] + " " + MONTHS[p[1] - 1]));
-        var temp = el("div", "t", Math.round(d.temperature_2m_max[i]) + "° ");
-        temp.appendChild(el("i", "", Math.round(d.temperature_2m_min[i]) + "°"));
-        cell.appendChild(temp);
-        cell.appendChild(el("div", "w", WORDS[d.weather_code[i]] || "Mixed"));
-        var snow = d.snowfall_sum[i], rain = d.precipitation_sum[i];
-        cell.appendChild(el("div", "s", snow >= 0.1 ? snow.toFixed(1) + " cm snow" : (rain >= 0.1 ? rain.toFixed(1) + " mm rain" : "Dry")));
-        cell.appendChild(el("div", "w", DIRS[Math.round(d.wind_direction_10m_dominant[i] / 45) % 8] + " " + Math.round(d.wind_speed_10m_max[i]) + ", gusts " + Math.round(d.wind_gusts_10m_max[i])));
-        box.appendChild(cell);
-      });
-      var stamp = document.querySelector("[data-forecast-stamp]");
-      if (stamp) { stamp.textContent = "Live forecast, fetched just now on this device."; }
-    }).catch(function () { /* offline: the build time forecast stays */ });
+    if (!window.fetch) { return; }
+    document.querySelectorAll("[data-forecast]").forEach(function (box) {
+      fetch(box.getAttribute("data-forecast")).then(function (r) { return r.json(); }).then(function (j) {
+        var d = j.daily;
+        if (!d || !d.time) { return; }
+        box.textContent = "";
+        d.time.forEach(function (t, i) {
+          var p = t.split("-").map(Number);
+          var date = new Date(Date.UTC(p[0], p[1] - 1, p[2]));
+          var cell = el("div");
+          cell.appendChild(el("div", "d", DAYS[date.getUTCDay()] + " " + p[2] + " " + MONTHS[p[1] - 1]));
+          var temp = el("div", "t", Math.round(d.temperature_2m_max[i]) + "\u00b0 ");
+          temp.appendChild(el("i", "", Math.round(d.temperature_2m_min[i]) + "\u00b0"));
+          cell.appendChild(temp);
+          cell.appendChild(el("div", "w", WORDS[d.weather_code[i]] || "Mixed"));
+          var snow = d.snowfall_sum[i], rain = d.precipitation_sum[i];
+          cell.appendChild(el("div", "s", snow >= 0.1 ? snow.toFixed(1) + " cm snow" : (rain >= 0.1 ? rain.toFixed(1) + " mm rain" : "Dry")));
+          cell.appendChild(el("div", "w", DIRS[Math.round(d.wind_direction_10m_dominant[i] / 45) % 8] + " " + Math.round(d.wind_speed_10m_max[i]) + ", gusts " + Math.round(d.wind_gusts_10m_max[i])));
+          box.appendChild(cell);
+        });
+        var stamp = box.nextElementSibling;
+        if (stamp && stamp.hasAttribute("data-forecast-stamp")) { stamp.textContent = "Live forecast, fetched just now on this device."; }
+      }).catch(function () { /* offline: the build time forecast stays */ });
+    });
   }
 
   // Offline: register the worker, and let a button pull every map into the cache.

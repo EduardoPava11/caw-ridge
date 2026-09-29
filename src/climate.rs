@@ -12,20 +12,21 @@ use crate::sun;
 pub fn fetch_history() -> Res<String> {
     let url = format!(
         "https://archive-api.open-meteo.com/v1/archive?latitude={}&longitude={}&elevation={}&start_date=2016-08-15&end_date=2025-12-15&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant&timezone=America%2FEdmonton&wind_speed_unit=kmh",
-        config::WPT_LAT, config::WPT_LON, 1991
+        config::RIDGE_LAT, config::RIDGE_LON, 1991
     );
     Ok(String::from_utf8(crate::cog::get(&url)?)?)
 }
 
-pub fn forecast_url() -> String {
+/// The forecast for a point. The service reads the height of the point from its own
+/// 90 m elevation model and scales the temperatures to it.
+pub fn forecast_url(lat: f64, lon: f64) -> String {
     format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&elevation={}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,weather_code,precipitation_probability_max&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,freezing_level_height,precipitation,snowfall,weather_code&timezone=America%2FEdmonton&forecast_days=10&wind_speed_unit=kmh",
-        config::WPT_LAT, config::WPT_LON, 1991
+        "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,weather_code,precipitation_probability_max&timezone=America%2FEdmonton&forecast_days=10&wind_speed_unit=kmh"
     )
 }
 
-pub fn fetch_forecast() -> Res<String> {
-    Ok(String::from_utf8(crate::cog::get(&forecast_url())?)?)
+pub fn fetch_forecast(lat: f64, lon: f64) -> Res<String> {
+    Ok(String::from_utf8(crate::cog::get(&forecast_url(lat, lon))?)?)
 }
 
 #[allow(dead_code)]
@@ -76,6 +77,8 @@ pub struct Day {
 pub struct Forecast {
     pub days: Vec<Day>,
     pub fetched: String,
+    /// The height the forecast was scaled to, as the service reports it.
+    pub elevation: f32,
 }
 
 fn arr(v: &Value, k: &str) -> Vec<f32> {
@@ -149,8 +152,8 @@ pub fn load_history(dir: &Path) -> Res<Climate> {
     Ok(Climate { weeks, rose: Rose { sectors, days }, years: (y0, y1) })
 }
 
-pub fn load_forecast(dir: &Path) -> Res<Forecast> {
-    let text = std::fs::read_to_string(dir.join("forecast.json"))?;
+pub fn load_forecast(dir: &Path, name: &str) -> Res<Forecast> {
+    let text = std::fs::read_to_string(dir.join(name))?;
     let v: Value = serde_json::from_str(&text)?;
     let times: Vec<String> = v["daily"]["time"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
     let (tmax, tmin, pr, sn, wd, gu, di, pop) = (
@@ -170,7 +173,7 @@ pub fn load_forecast(dir: &Path) -> Res<Forecast> {
         .map(|(i, t)| Day { date: t.clone(), tmax: tmax[i], tmin: tmin[i], precip: pr[i], snow: sn[i], wind: wd[i], gust: gu[i], dir: di[i], code: codes.get(i).cloned().unwrap_or(0), pop: pop.get(i).cloned().unwrap_or(f32::NAN) })
         .collect();
     let fetched = v["fetched"].as_str().unwrap_or("").to_string();
-    Ok(Forecast { days, fetched })
+    Ok(Forecast { days, fetched, elevation: v["elevation"].as_f64().unwrap_or(f64::NAN) as f32 })
 }
 
 /// WMO weather interpretation codes, in plain words.

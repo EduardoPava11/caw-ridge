@@ -60,10 +60,10 @@ pub const RIDGE: Sheet = Sheet {
 
 pub const CLOSE: Sheet = Sheet {
     id: "close",
-    title: "Caw Ridge: the waypoint",
+    title: "Caw Ridge: waypoint and ridge",
     bbox: config::CLOSE,
-    grid_res: 5.0,
-    scale: 2.0,
+    grid_res: 6.0,
+    scale: 1.6,
     contour: 10.0,
     index: 50.0,
     utm_step: 1000.0,
@@ -85,14 +85,22 @@ pub struct Overlay {
     pub grid: bool,
     pub wildlife: bool,
     pub coal: bool,
+    /// The waypoint, the ridge point and whatever a sheet adds of its own.
+    pub markers: bool,
 }
 
 impl Overlay {
+    /// The same line work with nothing written or pinned on it, to lay over the 3D
+    /// ground, where a symbol drawn on the map would be stretched across the hillside.
+    pub fn drape(&self) -> Overlay {
+        Overlay { labels: false, grid: false, markers: false, ..self.clone() }
+    }
+
     pub fn topo() -> Overlay {
-        Overlay { contours: true, quiet: false, water: true, roads: true, boundaries: true, labels: true, grid: true, wildlife: false, coal: false }
+        Overlay { contours: true, quiet: false, water: true, roads: true, boundaries: true, labels: true, grid: true, wildlife: false, coal: false, markers: true }
     }
     pub fn thematic() -> Overlay {
-        Overlay { contours: true, quiet: true, water: true, roads: true, boundaries: false, labels: true, grid: true, wildlife: false, coal: false }
+        Overlay { contours: true, quiet: true, water: true, roads: true, boundaries: false, labels: true, grid: true, wildlife: false, coal: false, markers: true }
     }
 }
 
@@ -279,7 +287,7 @@ impl<'a> Frame<'a> {
             self.draw_coal(&mut svg);
         }
         if ov.contours {
-            self.draw_contours(&mut svg, ov.quiet, &mut placer);
+            self.draw_contours(&mut svg, ov.quiet, ov.labels, &mut placer);
         }
         if ov.water {
             self.draw_water(&mut svg);
@@ -293,8 +301,11 @@ impl<'a> Frame<'a> {
         if ov.roads {
             self.draw_roads(&mut svg);
         }
-        extra(&mut svg, self, &mut placer);
-        self.draw_waypoint(&mut svg, &mut placer);
+        if ov.markers {
+            extra(&mut svg, self, &mut placer);
+            self.draw_waypoint(&mut svg, &mut placer);
+            self.draw_ridge_point(&mut svg, &mut placer);
+        }
         if ov.labels {
             self.draw_labels(&mut svg, &mut placer, ov);
         }
@@ -313,7 +324,7 @@ impl<'a> Frame<'a> {
         Ok(sheet)
     }
 
-    fn draw_contours(&self, svg: &mut Svg, quiet: bool, placer: &mut Placer) {
+    fn draw_contours(&self, svg: &mut Svg, quiet: bool, lettered: bool, placer: &mut Placer) {
         let k = self.k;
         let s = self.sheet.scale as f32;
         let (ink, ink_index) = if quiet { ("#2b2b2b", "#1f1f1f") } else { ("#9b6a3c", "#7d4f26") };
@@ -357,7 +368,7 @@ impl<'a> Frame<'a> {
         }
         svg.path(&thin, &format!("fill=\"none\" stroke=\"{ink}\" stroke-opacity=\"{op}\" stroke-width=\"{:.2}\" stroke-linejoin=\"round\"", 0.55 * k));
         svg.path(&thick, &format!("fill=\"none\" stroke=\"{ink_index}\" stroke-opacity=\"{op_index}\" stroke-width=\"{:.2}\" stroke-linejoin=\"round\"", 1.15 * k));
-        for (x, y, a, s) in labels {
+        for (x, y, a, s) in labels.into_iter().filter(|_| lettered) {
             let w = st.width(&s);
             let r = w.max(st.size) / 2.0 + 2.0 * k;
             if x < r || y < r || x > self.vd.w as f32 - r || y > self.vd.h as f32 - r {
@@ -621,6 +632,27 @@ impl<'a> Frame<'a> {
             n += step;
         }
         svg.path(&d, &format!("fill=\"none\" stroke=\"#10324f\" stroke-opacity=\"0.38\" stroke-width=\"{:.2}\"", 0.6 * k));
+    }
+
+    /// The first point of the guide, up on the ridge: a plain ring, second to the waypoint.
+    fn draw_ridge_point(&self, svg: &mut Svg, placer: &mut Placer) {
+        let k = self.k;
+        if !self.sheet.bbox.contains(config::RIDGE_LON, config::RIDGE_LAT) {
+            return;
+        }
+        let (x, y) = self.p(config::RIDGE_LON, config::RIDGE_LAT);
+        let r = 7.0 * k;
+        svg.circle(x, y, r, &format!("fill=\"none\" stroke=\"#ffffff\" stroke-width=\"{:.1}\" stroke-opacity=\"0.9\"", 4.6 * k));
+        svg.circle(x, y, r, &format!("fill=\"#ffffff\" fill-opacity=\"0.35\" stroke=\"#a5150f\" stroke-width=\"{:.1}\"", 2.2 * k));
+        svg.circle(x, y, 1.6 * k, "fill=\"#a5150f\"");
+        placer.claim([x - r * 1.5, y - r * 1.5, x + r * 1.5, y + r * 1.5]);
+        if self.sheet.level == 0 {
+            return;
+        }
+        let st = TextStyle::new(Family::Condensed, 13.0 * k, 700, "#a5150f").halo("#ffffff", 3.2 * k).upper().spaced(0.5);
+        let s2 = TextStyle::new(Family::Semi, 10.5 * k, 500, "#5c0d09").halo("#ffffff", 2.8 * k);
+        let z = format!("{:.0} m", self.world.dem.sample(config::RIDGE_LON, config::RIDGE_LAT));
+        self.point_label(svg, placer, x, y, r * 1.6, &[("Ridge point", &st), (&z, &s2)], true);
     }
 
     fn draw_waypoint(&self, svg: &mut Svg, placer: &mut Placer) {
