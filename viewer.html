@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Map viewer | Caw Ridge</title>
+<meta name="description" content="Pan and zoom a Caw Ridge map.">
+<meta name="theme-color" content="#1d1d1b">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<link rel="preload" href="assets/fonts/BarlowCondensed-Bold.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/style.css?v=29Sep20261727MDT">
+
+<script>try{var t=localStorage.getItem('cawridge-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<header class="mast"><div class="wrap"><a class="brand" href="index.html"><b>Caw Ridge</b><span>54.0958 N 119.3240 W</span></a><nav aria-label="Sections"><a href="index.html">Overview</a><a href="maps.html">Maps</a><a href="terrain3d.html">3D</a><a href="explore.html">Explore</a><a href="terrain.html">Terrain</a><a href="access.html">Access</a><a href="regulations.html">Regulations</a><a href="wildlife.html">Wildlife</a><a href="weather.html">Weather</a><a href="safety.html">Safety</a><a href="sources.html">Sources</a></nav><button class="theme" type="button">Night</button></div></header>
+<div class="stage" aria-label="Map viewer. Drag to move, pinch or scroll to zoom."><img alt=""></div><div class="hud"><div class="panel"><b data-title>Map</b><span data-blurb></span></div><div class="tools"><a class="tool" href="maps.html">All maps</a><a class="tool" data-download href="#">Download</a><button type="button" data-out aria-label="Zoom out">&minus;</button><button type="button" data-fit>Fit</button><button type="button" data-in aria-label="Zoom in">+</button></div></div>
+
+<script src="assets/app.js?v=29Sep20261727MDT" defer></script>
+<script src="assets/viewer.js?v=29Sep20261727MDT" defer></script>
+</body>
+</html>
