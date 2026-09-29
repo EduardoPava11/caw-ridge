@@ -132,8 +132,11 @@
     var lines = [
       lat.toFixed(5) + ", " + lon.toFixed(5) + (acc ? "  (within " + Math.round(acc) + " m)" : ""),
       u.zone + "U " + String(Math.round(u.e)).padStart(6, "0") + " E " + Math.round(u.n) + " N",
-      (h === null ? "" : Math.round(h) + " m   ") + "to waypoint: " + (d < 1000 ? Math.round(d) + " m" : (d / 1000).toFixed(2) + " km") + " at " + Math.round(b) + "° true (" + DIR16[Math.round(b / 22.5) % 16] + "), " + Math.round(mag) + "° magnetic"
+      "To waypoint: " + (d < 1000 ? Math.round(d) + " m" : (d / 1000).toFixed(2) + " km") + " at " + Math.round(b) + "° true (" + DIR16[Math.round(b / 22.5) % 16] + "), " + Math.round(mag) + "° magnetic"
     ];
+    // At the waypoint itself a bearing means nothing.
+    if (d < 1) { lines.pop(); }
+    if (h !== null) { lines.splice(2, 0, "Height " + Math.round(h).toLocaleString("en-CA") + " m"); }
     lines.forEach(function (s) { var e = document.createElement("div"); e.textContent = s; readout.appendChild(e); });
   }
   var tapped;
