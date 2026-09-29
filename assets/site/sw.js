@@ -1,7 +1,8 @@
-// Offline support. Pages and assets are answered from the cache at once and refreshed in
-// the background, so the site opens with no signal and still picks up new builds.
+// Offline support. With a connection the network always wins, so a new build is never
+// mixed with pieces of an old one. With no answer inside three seconds, or no
+// connection at all, the saved copy is used.
 var CORE = "cawridge-core-__VERSION__";
-var MAPS = "cawridge-maps-v1";
+var MAPS = "cawridge-maps-v2";
 var FILES = __FILES__;
 
 self.addEventListener("install", function (e) {
@@ -18,41 +19,27 @@ self.addEventListener("fetch", function (e) {
   var url = new URL(req.url);
   if (url.origin !== location.origin) { return; }
   var big = /\/maps\//.test(url.pathname) || /\.(kmz|gpx|kml)$/.test(url.pathname);
-  var page = req.mode === "navigate" || /\.(html|json)$/.test(url.pathname) || url.pathname.endsWith("/");
-  if (page) {
-    // Pages: the network first, so a new build shows at once; the cache if there is no
-    // answer within three seconds.
-    e.respondWith(new Promise(function (resolve) {
-      var settled = false;
-      function fromCache() {
-        return caches.match(req, { ignoreSearch: true }).then(function (hit) { return hit || caches.match("index.html"); });
-      }
-      var timer = setTimeout(function () {
-        fromCache().then(function (hit) { if (hit && !settled) { settled = true; resolve(hit); } });
-      }, 3000);
-      fetch(req).then(function (res) {
-        clearTimeout(timer);
-        if (res && res.ok && res.type === "basic") {
-          var copy = res.clone();
-          caches.open(CORE).then(function (c) { c.put(req, copy); });
-        }
-        if (!settled) { settled = true; resolve(res); }
-      }).catch(function () {
-        clearTimeout(timer);
-        fromCache().then(function (hit) { if (!settled) { settled = true; resolve(hit || Response.error()); } });
-      });
-    }));
-    return;
-  }
-  e.respondWith(caches.match(req, { ignoreSearch: true }).then(function (hit) {
-    var net = fetch(req).then(function (res) {
+  var page = req.mode === "navigate";
+  // The address without its version stamp is the key, so each file is kept once.
+  var key = url.origin + url.pathname;
+  e.respondWith(new Promise(function (resolve) {
+    var settled = false;
+    function saved() {
+      return caches.match(key, { ignoreSearch: true }).then(function (hit) { return hit || (page ? caches.match("index.html") : undefined); });
+    }
+    var timer = setTimeout(function () {
+      saved().then(function (hit) { if (hit && !settled) { settled = true; resolve(hit); } });
+    }, 3000);
+    fetch(req).then(function (res) {
+      clearTimeout(timer);
       if (res && res.ok && res.type === "basic") {
         var copy = res.clone();
-        // Large files are only kept once the reader has asked to save them, or has opened them.
-        caches.open(big ? MAPS : CORE).then(function (c) { c.put(req, copy); });
+        caches.open(big ? MAPS : CORE).then(function (c) { c.put(key, copy); });
       }
-      return res;
-    }).catch(function () { return hit || caches.match("index.html"); });
-    return hit || net;
+      if (!settled) { settled = true; resolve(res); }
+    }).catch(function () {
+      clearTimeout(timer);
+      saved().then(function (hit) { if (!settled) { settled = true; resolve(hit || Response.error()); } });
+    });
   }));
 });

@@ -42,6 +42,11 @@ struct Page<'a> {
 /// build is never served from an old copy in the browser's cache.
 fn stamp(html: &str, v: &str) -> String {
     let mut s = html.to_string();
+    // Pictures set into the pages.
+    for dir in ["maps/mid/", "maps/thumb/"] {
+        s = s.replace(&format!("src=\"{dir}"), &format!("src=\"{dir}")).replace(".jpg\" alt=", &format!(".jpg?v={v}\" alt="));
+    }
+    s = s.replace("src=\"maps/hero.jpg\"", &format!("src=\"maps/hero.jpg?v={v}\""));
     for f in ["assets/style.css", "assets/app.js", "assets/viewer.js", "assets/explore.js", "assets/terrain-data.js", "assets/terrain3d.js"] {
         s = s.replace(&format!("\"{f}\""), &format!("\"{f}?v={v}\""));
     }
@@ -254,6 +259,10 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, fc_ridg
         pm.save_png(out.join(format!("assets/icon-{size}.png")))?;
     }
 
+    // Maps and grids keep their names from build to build while their contents change,
+    // so every address handed to a script carries the build stamp.
+    let v: String = built.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let vq = |path: &str| -> String { format!("{path}?v={v}") };
     let places = places(world, p);
     std::fs::write(out.join("data/cawridge.gpx"), export::gpx(&places, p))?;
     std::fs::write(out.join("data/cawridge.kml"), export::kml(&places, p))?;
@@ -272,11 +281,11 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, fc_ridg
     let mut grid_spec = serde_json::Map::new();
     for (file, w, h, b) in &p.grids {
         let name = Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        grid_spec.insert(name, serde_json::json!({"src": file, "w": w, "h": h, "bbox": bb(b)}));
+        grid_spec.insert(name, serde_json::json!({"src": vq(file), "w": w, "h": h, "bbox": bb(b)}));
     }
     if let Some((_, w, h, b)) = p.grids.iter().find(|g| g.0.ends_with("/a.png")) {
         for n in ["b", "c", "d"] {
-            grid_spec.insert(n.to_string(), serde_json::json!({"src": format!("data/terrain/{n}.png"), "w": w, "h": h, "bbox": bb(b)}));
+            grid_spec.insert(n.to_string(), serde_json::json!({"src": vq(&format!("data/terrain/{n}.png")), "w": w, "h": h, "bbox": bb(b)}));
         }
     }
     let cover_names: serde_json::Map<String, serde_json::Value> = [
@@ -309,7 +318,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, fc_ridg
     let maps_json: Vec<serde_json::Value> = p
         .maps
         .iter()
-        .map(|m| serde_json::json!({"id": m.id, "group": m.group, "title": m.title, "blurb": m.blurb, "view": m.view, "download": m.download, "bare": m.bare, "w": m.bbox.w, "s": m.bbox.s, "e": m.bbox.e, "n": m.bbox.n}))
+        .map(|m| serde_json::json!({"id": m.id, "group": m.group, "title": m.title, "blurb": m.blurb, "view": vq(&m.view), "download": m.download, "bare": vq(&m.bare), "w": m.bbox.w, "s": m.bbox.s, "e": m.bbox.e, "n": m.bbox.n}))
         .collect();
     std::fs::write(out.join("maps.json"), serde_json::to_string(&maps_json)?)?;
 
@@ -582,7 +591,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, fc_ridg
     {
         let mut maps_obj = serde_json::Map::new();
         for m in &p.maps {
-            maps_obj.insert(m.id.clone(), serde_json::json!({"bare": m.bare, "w": m.bbox.w, "s": m.bbox.s, "e": m.bbox.e, "n": m.bbox.n}));
+            maps_obj.insert(m.id.clone(), serde_json::json!({"bare": vq(&m.bare), "w": m.bbox.w, "s": m.bbox.s, "e": m.bbox.e, "n": m.bbox.n}));
         }
         let layer = |name: &str, ids: &[&str]| serde_json::json!({"name": name, "ids": ids});
         let layers = vec![
@@ -640,7 +649,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, fc_ridg
         let layers: Vec<serde_json::Value> = names
             .iter()
             .filter(|n| p.maps.iter().any(|m| m.id == format!("ridge_{}", n.0)))
-            .map(|n| serde_json::json!({"id": n.0, "name": n.1, "blurb": n.2, "ridge": format!("maps/drape/ridge_{}.jpg", n.0), "close": format!("maps/drape/close_{}.jpg", n.0)}))
+            .map(|n| serde_json::json!({"id": n.0, "name": n.1, "blurb": n.2, "ridge": vq(&format!("maps/drape/ridge_{}.jpg", n.0)), "close": vq(&format!("maps/drape/close_{}.jpg", n.0))}))
             .collect();
         let pl: Vec<serde_json::Value> = places.iter().map(|q| serde_json::json!({"name": q.name, "short": q.short, "kind": q.kind, "lat": q.lat, "lon": q.lon, "elev": q.elev.round(), "note": q.note})).collect();
         let mut routes: Vec<serde_json::Value> = p.drive.iter().map(|l| serde_json::json!({"kind": "drive", "pts": l.pts.iter().map(|q| vec![q.0, q.1]).collect::<Vec<_>>()})).collect();

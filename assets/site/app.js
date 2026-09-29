@@ -152,11 +152,13 @@
       fetch("offline.json").then(function (r) { return r.json(); }).then(function (list) {
         var done = 0, failed = 0;
         function say() { if (out) { out.textContent = "Saved " + done + " of " + list.length + " files" + (failed ? ", " + failed + " failed" : "") + "."; } }
-        return caches.open("cawridge-maps-v1").then(function (c) {
+        return caches.open("cawridge-maps-v2").then(function (c) {
           var chain = Promise.resolve();
           list.forEach(function (u) {
             chain = chain.then(function () {
-              return fetch(u).then(function (r) { if (r.ok) { done++; return c.put(u, r); } failed++; }).catch(function () { failed++; }).then(say);
+              var key = new URL(u, location.href);
+              key.search = "";
+              return fetch(u, { cache: "reload" }).then(function (r) { if (r.ok) { done++; return c.put(key.href, r); } failed++; }).catch(function () { failed++; }).then(say);
             });
           });
           return chain;

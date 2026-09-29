@@ -49,7 +49,7 @@
     m.on("click", function () { describe(p.name, p.lat, p.lon); });
     m.addTo(groups[g]);
   });
-  fetch("data/cawridge.geojson").then(function (r) { return r.json(); }).then(function (g) {
+  fetch("data/cawridge.geojson", { cache: "no-cache" }).then(function (r) { return r.json(); }).then(function (g) {
     L.geoJSON(g, {
       filter: function (f) { return f.geometry.type === "LineString"; },
       style: function (f) {

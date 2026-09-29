@@ -25,7 +25,7 @@
     place();
   }
 
-  fetch("maps.json").then(function (r) { return r.json(); }).then(function (maps) {
+  fetch("maps.json", { cache: "no-cache" }).then(function (r) { return r.json(); }).then(function (maps) {
     var m = maps.filter(function (k) { return k.id === id; })[0] || maps[0];
     document.title = m.title + " | Caw Ridge";
     document.querySelector("[data-title]").textContent = m.title;

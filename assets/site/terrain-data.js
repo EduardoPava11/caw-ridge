@@ -206,7 +206,7 @@
     return { clear: true };
   }
 
-  var ready = fetch("data/terrain/terrain.json").then(function (r) { return r.json(); }).then(function (m) {
+  var ready = fetch("data/terrain/terrain.json", { cache: "no-cache" }).then(function (r) { return r.json(); }).then(function (m) {
     M = m;
     return Promise.all(Object.keys(m.grids).map(function (k) { return load(k, m.grids[k]); }));
   }).then(function () { return M; });
