@@ -44,7 +44,7 @@ self.addEventListener("fetch", function (e) {
     }));
     return;
   }
-  e.respondWith(caches.match(req, { ignoreSearch: url.pathname.endsWith(".html") }).then(function (hit) {
+  e.respondWith(caches.match(req, { ignoreSearch: true }).then(function (hit) {
     var net = fetch(req).then(function (res) {
       if (res && res.ok && res.type === "basic") {
         var copy = res.clone();

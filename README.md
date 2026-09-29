@@ -11,9 +11,10 @@ The site is in `docs/` and is served by GitHub Pages.
 | Page | What it holds |
 |---|---|
 | Overview | The facts at a glance, the eight things to know first, the forecast |
-| Maps | 28 sheets at three scales: topographic, satellite, slope, aspect, ground cover, first sun, hours of sun, first snow, walking time, visibility, wildlife ranges, coal leases |
-| Explore | Every sheet over the ground in one interactive map, with GPS position, grid references, heights and bearings |
-| Terrain | Glassing points ranked by the open ground they see, slope and cover statistics, sun and thermals, walking times |
+| 3D | The ridge as a mesh you can turn, with any map draped over it. Stand on any point and look around, raise the glass, measure a shot and its line of sight, light it with the real sun, and tap anywhere to ask about the ground |
+| Maps | 34 sheets at three scales: topographic, satellite, height, slope, aspect, landforms and saddles, ground cover, wind shelter, first sun, hours of sun, first snow, walking time, visibility, wildlife ranges, coal leases |
+| Explore | Every sheet over the ground in one flat map, with GPS position. Tap anywhere for height, slope, aspect, landform, cover, shelter, sun, snow, walking time and bearings |
+| Terrain | Glassing points ranked by the open ground they see, every saddle and summit with coordinates, landforms, height bands, slope and cover, wind shelter, sun and thermals, walking times |
 | Access | The drive from Grande Cache leg by leg with its profile, road reports, camping, services, land status |
 | Regulations | WMU 446 seasons for 2026, mountain rules, licences, registration, contacts |
 | Wildlife | What lives on the ridge, what is protected, how to tell caribou from elk and grizzly from black bear |
@@ -60,7 +61,7 @@ the numbers on the pages follow. The prose about regulations, wildlife and acces
 | `src/vector.rs` | Roads, water, boundaries and names from three services |
 | `src/view.rs` | Map views, slope, aspect, relief shading |
 | `src/contour.rs` | Contour lines by marching squares |
-| `src/analysis.rs` | Sight lines, sun exposure, walking time, drainage |
+| `src/analysis.rs` | Sight lines, sun exposure, walking time, drainage, landforms, summits and saddles, wind shelter |
 | `src/route.rs` | Routing over the road network, elevation profiles |
 | `src/sun.rs` | Sunrise, sunset, twilight, moon phase, the calendar |
 | `src/wmm.rs` | Magnetic declination from the World Magnetic Model 2025 |
@@ -71,6 +72,12 @@ the numbers on the pages follow. The prose about regulations, wildlife and acces
 | `src/chart.rs` | Charts as inline SVG |
 | `src/export.rs` | GPX, KML, KMZ, GeoJSON |
 | `src/site.rs` | The pages |
+| `assets/site/terrain-data.js` | Reads the terrain grids in the browser and answers "what is here?" |
+| `assets/site/terrain3d.js` | The 3D view, on three.js |
+
+The analysis is handed to the browser as PNG images in `docs/data/terrain/`, with the
+numbers packed into the colour channels. `terrain.json` beside them says how to read
+each one.
 
 ## Data and credit
 

@@ -120,9 +120,11 @@ fn main() -> Res<()> {
             }
             let out = Path::new("docs");
             let w = world::World::load()?;
-            let p = products::build(&w, out)?;
-            eprintln!("official layers at the waypoint: WMU {:?}, caribou {:?}, grizzly core {} (covers {:.0}% of the region), coal lease {:?}, goat and sheep range {}, park {:?}", p.stats.wmu, p.stats.caribou_range, p.stats.grizzly_core, p.stats.grizzly_share * 100.0, p.stats.coal_lease, p.stats.goat_sheep_range, p.stats.park);
             let clim = climate::load_history(Path::new("data"))?;
+            // The prevailing wind of the season, from the record, sets the shelter map.
+            let top = clim.rose.sectors.iter().enumerate().max_by(|a, b| a.1 .0.partial_cmp(&b.1 .0).unwrap()).map(|s| s.0).unwrap_or(6);
+            let p = products::build(&w, out, top as f32 * 45.0)?;
+            eprintln!("official layers at the waypoint: WMU {:?}, caribou {:?}, grizzly core {} (covers {:.0}% of the region), coal lease {:?}, goat and sheep range {}, park {:?}", p.stats.wmu, p.stats.caribou_range, p.stats.grizzly_core, p.stats.grizzly_share * 100.0, p.stats.coal_lease, p.stats.goat_sheep_range, p.stats.park);
             let fc = climate::load_forecast(Path::new("data"))?;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
             // The build date in Alberta's clock, so that "today" on the pages is the hunter's today.

@@ -42,6 +42,33 @@ pub struct VantageOut {
     pub bearing: f64,
 }
 
+pub struct SummitOut {
+    pub name: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub elev: f32,
+    pub prominence: f32,
+    pub edge: bool,
+    pub dist_m: f64,
+    pub bearing: f64,
+    pub open: bool,
+}
+
+pub struct SaddleOut {
+    pub name: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub elev: f32,
+    /// How far the ridge rises again beyond the gap, on the lower side.
+    pub depth: f32,
+    /// Bearing of the line of crossing, 0 to 180.
+    pub axis: f32,
+    pub drop: (f32, f32),
+    pub dist_m: f64,
+    pub bearing: f64,
+    pub open: bool,
+}
+
 pub struct SnowRow {
     pub winter: String,
     pub first: Option<(i64, f32)>,
@@ -87,6 +114,17 @@ pub struct Products {
     pub walk_back_h: f32,
     pub snow: Vec<SnowRow>,
     pub stats: Stats,
+    pub summits: Vec<SummitOut>,
+    pub saddles: Vec<SaddleOut>,
+    /// Share of the close sheet in each 100 m band of height: (floor of band, share).
+    pub bands: Vec<(f32, f32)>,
+    /// Share of sloping ground facing each of eight directions, north first.
+    pub aspects: [f32; 8],
+    /// Share of the close sheet in each landform class, by class number.
+    pub landform_share: [f32; 11],
+    pub wind_from: f32,
+    /// The terrain grids written for the browser: (file, width, height).
+    pub grids: Vec<(String, usize, usize, BBox)>,
 }
 
 fn rgb_hex(c: Rgb) -> String {
@@ -172,8 +210,8 @@ impl<'a> Saver<'a> {
 
 fn none(_: &mut Svg, _: &Frame, _: &mut Placer) {}
 
-pub fn build(world: &World, out: &Path) -> Res<Products> {
-    for d in ["maps", "maps/bare", "maps/thumb", "maps/mid"] {
+pub fn build(world: &World, out: &Path, wind_from: f32) -> Res<Products> {
+    for d in ["maps", "maps/bare", "maps/thumb", "maps/mid", "data/terrain"] {
         std::fs::create_dir_all(out.join(d))?;
     }
     let ra = &world.ra;
@@ -374,6 +412,88 @@ pub fn build(world: &World, out: &Path) -> Res<Products> {
         }
     }
 
+    // ----------------------------------------------------------- landforms
+    eprintln!("landforms, summits, saddles, wind shelter");
+    let tpi_small = analysis::tpi(rt, 300.0);
+    let tpi_large = analysis::tpi(rt, 2000.0);
+    let landform = analysis::landforms(rt, &tpi_small, &tpi_large);
+    let shelter = analysis::shelter(rt, ridge_win, wind_from, 300.0);
+    // A summit counts if it stands a contour and a half of the ridge sheet above its saddle.
+    let min_prom = 30.0;
+    let peaks = analysis::summits(rt, min_prom);
+    let in_close = |x: usize, y: usize| -> bool {
+        let (lon, lat) = ra.lonlat(x as f64 + 0.5, y as f64 + 0.5);
+        config::CLOSE.contains(lon, lat)
+    };
+    let mut summits: Vec<SummitOut> = Vec::new();
+    for pk in peaks.iter().filter(|p| in_close(p.x, p.y)) {
+        let (lon, lat) = ra.lonlat(pk.x as f64 + 0.5, pk.y as f64 + 0.5);
+        summits.push(SummitOut {
+            name: format!("Point {:.0}", pk.z),
+            lon,
+            lat,
+            elev: pk.z,
+            prominence: pk.prominence,
+            edge: pk.edge,
+            dist_m: geo::haversine(config::WPT_LON, config::WPT_LAT, lon, lat),
+            bearing: geo::bearing(config::WPT_LON, config::WPT_LAT, lon, lat),
+            open: is_open(cover[pk.y * ra.w + pk.x]),
+        });
+    }
+    summits.truncate(14);
+    let mut saddles: Vec<SaddleOut> = Vec::new();
+    for pk in peaks.iter().filter(|p| !p.edge && in_close(p.saddle.0, p.saddle.1)) {
+        let (sx, sy, sz) = pk.saddle;
+        let (lon, lat) = ra.lonlat(sx as f64 + 0.5, sy as f64 + 0.5);
+        if saddles.iter().any(|s| geo::haversine(s.lon, s.lat, lon, lat) < 400.0) {
+            continue;
+        }
+        let (axis, d1, d2) = analysis::saddle_axis(rt, sx, sy, 150.0);
+        saddles.push(SaddleOut {
+            name: String::new(),
+            lon,
+            lat,
+            elev: sz,
+            depth: pk.prominence,
+            axis,
+            drop: (d1, d2),
+            dist_m: geo::haversine(config::WPT_LON, config::WPT_LAT, lon, lat),
+            bearing: geo::bearing(config::WPT_LON, config::WPT_LAT, lon, lat),
+            open: is_open(cover[sy * ra.w + sx]),
+        });
+    }
+    saddles.truncate(14);
+    // Number the saddles outward from the waypoint, so S1 is the nearest.
+    saddles.sort_by(|a, b| a.dist_m.partial_cmp(&b.dist_m).unwrap());
+    for (i, s) in saddles.iter_mut().enumerate() {
+        s.name = format!("S{}", i + 1);
+    }
+
+    // Height bands, aspect and landform shares over the close sheet.
+    let mut band_area: std::collections::BTreeMap<i32, f32> = Default::default();
+    let mut aspects = [0f32; 8];
+    let mut landform_share = [0f32; 11];
+    let (mut cells, mut sloping) = (0f32, 0f32);
+    for y in close_win.1..close_win.3 {
+        for x in close_win.0..close_win.2 {
+            let i = y * ra.w + x;
+            *band_area.entry((rt.z[i] / 100.0).floor() as i32).or_default() += 1.0;
+            landform_share[landform[i] as usize] += 1.0;
+            cells += 1.0;
+            if rt.slope[i] >= 5.0 {
+                aspects[(((rt.aspect[i] + 22.5) / 45.0) as usize) % 8] += 1.0;
+                sloping += 1.0;
+            }
+        }
+    }
+    let bands: Vec<(f32, f32)> = band_area.iter().map(|(k, v)| (*k as f32 * 100.0, v / cells)).collect();
+    for a in aspects.iter_mut() {
+        *a /= sloping.max(1.0);
+    }
+    for l in landform_share.iter_mut() {
+        *l /= cells.max(1.0);
+    }
+
     // ---------------------------------------------------------------- snow
     let mut snow_rows = Vec::new();
     for (w, first, unc, lasting) in &world.snow {
@@ -508,8 +628,117 @@ pub fn build(world: &World, out: &Path) -> Res<Products> {
         treeline,
     };
 
+    // ------------------------------------------- terrain grids for the browser
+    // Everything the analysis knows, cell by cell, packed into the colour channels of
+    // PNG images so that a page can answer "what is here?" with no server.
+    let mut grids = Vec::new();
+    {
+        let gv = crate::view::View::new(config::RIDGE, 20.0);
+        let n_g = gv.w * gv.h;
+        let mut a = Vec::with_capacity(n_g * 3);
+        let mut b = Vec::with_capacity(n_g * 3);
+        let mut c = Vec::with_capacity(n_g * 3);
+        let mut d = Vec::with_capacity(n_g * 3);
+        let near = |lon: f64, lat: f64| -> usize {
+            let (x, y) = ra.px(lon, lat);
+            (y.max(0.0) as usize).min(ra.h - 1) * ra.w + (x.max(0.0) as usize).min(ra.w - 1)
+        };
+        for i in 0..n_g {
+            let (lon, lat) = gv.lonlat((i % gv.w) as f64 + 0.5, (i / gv.w) as f64 + 0.5);
+            let k = near(lon, lat);
+            let slope = world.sample_ra(&rt.slope, lon, lat);
+            a.extend_from_slice(&[(slope * 2.0).round().clamp(0.0, 255.0) as u8, if rt.slope[k] < 2.0 { 255 } else { (rt.aspect[k] / 1.5).round().clamp(0.0, 240.0) as u8 }, (cover[k] as i32).clamp(0, 255) as u8]);
+            let fs = sun_first[k];
+            let sh = world.sample_ra(&sun_hours, lon, lat);
+            b.extend_from_slice(&[landform[k], if fs.is_nan() { 255 } else { ((fs - 4.0) * 12.0).round().clamp(0.0, 254.0) as u8 }, if sh.is_nan() { 0 } else { (sh * 16.0).round().clamp(0.0, 255.0) as u8 }]);
+            let sd = snow_median(lon, lat).unwrap_or(0.0);
+            let wt = world.sample_ra(&t_out, lon, lat);
+            let seen = view_wpt[k];
+            let gc = seen_count[k];
+            let flags = (if seen > 0.5 { 1u8 } else { 0 }) | (if seen.is_nan() { 0 } else { 2 }) | (if gc.is_nan() { 0 } else { 4 }) | (((if gc.is_nan() { 0.0 } else { gc }) as u8).min(15) << 4);
+            c.extend_from_slice(&[sd.round().clamp(0.0, 255.0) as u8, if wt.is_finite() { (wt * 60.0 / 3.0).round().clamp(0.0, 254.0) as u8 } else { 255 }, flags]);
+            let sx = world.sample_ra(&shelter, lon, lat);
+            d.extend_from_slice(&[
+                if sx.is_nan() { 0 } else { (sx * 4.0 + 128.0).round().clamp(1.0, 255.0) as u8 },
+                (tpi_small[k] * 32.0 + 128.0).round().clamp(0.0, 255.0) as u8,
+                (tpi_large[k] * 32.0 + 128.0).round().clamp(0.0, 255.0) as u8,
+            ]);
+        }
+        for (name, buf) in [("a", &a), ("b", &b), ("c", &c), ("d", &d)] {
+            image::save_buffer(out.join(format!("data/terrain/{name}.png")), buf, gv.w as u32, gv.h as u32, image::ExtendedColorType::Rgb8)?;
+        }
+        // Heights, for both sheets.
+        for (name, bbox, res) in [("elev_ridge", config::RIDGE, 20.0), ("elev_close", config::CLOSE, 10.0)] {
+            let ev = crate::view::View::new(bbox, res);
+            let ez = ev.elevation(&world.dem);
+            let mut buf = Vec::with_capacity(ev.w * ev.h * 3);
+            for v in &ez {
+                let t = (v + 32768.0).max(0.0);
+                buf.extend_from_slice(&[(t / 256.0).floor() as u8, (t.floor() % 256.0) as u8, (t.fract() * 256.0) as u8]);
+            }
+            image::save_buffer(out.join(format!("data/terrain/{name}.png")), &buf, ev.w as u32, ev.h as u32, image::ExtendedColorType::Rgb8)?;
+            grids.push((format!("data/terrain/{name}.png"), ev.w, ev.h, bbox));
+        }
+        grids.push(("data/terrain/a.png".to_string(), gv.w, gv.h, config::RIDGE));
+    }
+
     // ---------------------------------------------------------------- maps
     let mut sv = Saver { dir: out, maps: Vec::new() };
+    let landform_extra = |svg: &mut Svg, f: &Frame, placer: &mut Placer| {
+        let k = f.k;
+        let st = TextStyle::new(Family::Condensed, 13.0 * k, 700, "#1d1d1b").halo("#ffffff", 3.2 * k);
+        let sh = TextStyle::new(Family::Semi, 10.5 * k, 500, "#1d1d1b").halo("#ffffff", 2.8 * k);
+        for s in &saddles {
+            if !f.sheet.bbox.contains(s.lon, s.lat) {
+                continue;
+            }
+            let (x, y) = f.p(s.lon, s.lat);
+            let r = 6.0 * k;
+            // A pass is drawn as two arcs facing each other, the old sign for a gap.
+            let a = (s.axis + 90.0).to_radians();
+            let (ux, uy) = (a.sin(), -a.cos());
+            let (vx, vy) = (-uy, ux);
+            for side in [-1.0f32, 1.0] {
+                let (cx, cy) = (x + ux * side * r * 1.5, y + uy * side * r * 1.5);
+                svg.path(
+                    &format!("M{:.1} {:.1}Q{:.1} {:.1} {:.1} {:.1}", cx + vx * r * 1.3, cy + vy * r * 1.3, cx - ux * side * r * 1.1, cy - uy * side * r * 1.1, cx - vx * r * 1.3, cy - vy * r * 1.3),
+                    &format!("fill=\"none\" stroke=\"#ffffff\" stroke-width=\"{:.1}\" stroke-linecap=\"round\"", 5.0 * k),
+                );
+                svg.path(
+                    &format!("M{:.1} {:.1}Q{:.1} {:.1} {:.1} {:.1}", cx + vx * r * 1.3, cy + vy * r * 1.3, cx - ux * side * r * 1.1, cy - uy * side * r * 1.1, cx - vx * r * 1.3, cy - vy * r * 1.3),
+                    &format!("fill=\"none\" stroke=\"#1d1d1b\" stroke-width=\"{:.1}\" stroke-linecap=\"round\"", 2.2 * k),
+                );
+            }
+            placer.claim([x - r * 2.0, y - r * 2.0, x + r * 2.0, y + r * 2.0]);
+            let w = st.width(&s.name);
+            for (dx, dy) in [(r * 2.4, 5.0 * k), (-r * 2.4 - w, 5.0 * k), (-w / 2.0, -r * 2.4), (-w / 2.0, r * 2.4 + st.size)] {
+                if placer.try_claim([x + dx, y + dy - st.size, x + dx + w, y + dy + 2.0]) {
+                    svg.text(x + dx, y + dy, &s.name, &st, "start", 0.0);
+                    break;
+                }
+            }
+        }
+        for s in &summits {
+            if !f.sheet.bbox.contains(s.lon, s.lat) {
+                continue;
+            }
+            let (x, y) = f.p(s.lon, s.lat);
+            let t = 5.5 * k;
+            svg.path(
+                &format!("M{:.1} {:.1}L{:.1} {:.1}L{:.1} {:.1}Z", x, y - t, x + t, y + t * 0.8, x - t, y + t * 0.8),
+                &format!("fill=\"#1d1d1b\" stroke=\"#ffffff\" stroke-width=\"{:.1}\"", 1.4 * k),
+            );
+            placer.claim([x - t, y - t, x + t, y + t]);
+            let label = format!("{:.0}", s.elev);
+            let w = sh.width(&label);
+            for (dx, dy) in [(t + 3.0 * k, 4.0 * k), (-t - 3.0 * k - w, 4.0 * k), (-w / 2.0, -t - 3.0 * k), (-w / 2.0, t + sh.size)] {
+                if placer.try_claim([x + dx, y + dy - sh.size, x + dx + w, y + dy + 2.0]) {
+                    svg.text(x + dx, y + dy, &label, &sh, "start", 0.0);
+                    break;
+                }
+            }
+        }
+    };
     let li = |c: &str, l: &str| LegendItem { swatch: maps::swatch_box(c, "#555"), label: l.to_string() };
     let route_extra = |svg: &mut Svg, f: &Frame, placer: &mut Placer| {
         let k = f.k;
@@ -800,7 +1029,76 @@ pub fn build(world: &World, out: &Path) -> Res<Products> {
         let bare = f.compose(&base, &ov, &vantage_extra, None)?;
         sv.save(&f, &format!("{prefix}_glass"), "Glassing", &format!("{place}: glassing points"), "The eight best places to sit behind glass, found by testing hundreds of spots for how much open ground each one sees, and the ground they cover between them.", &sheet, &bare, false)?;
         let _ = &score_grid;
+
+        // Landforms, with the saddles and summits.
+        let base = f.base_value(0.74, |lon, lat, _| {
+            let (x, y) = ra.px(lon, lat);
+            if x < 0.0 || y < 0.0 || x as usize >= ra.w || y as usize >= ra.h {
+                return None;
+            }
+            let c = landform[y as usize * ra.w + x as usize] as usize;
+            if c == 6 { None } else { Some(crate::draw::hex(analysis::LANDFORMS[c].2)) }
+        });
+        let mut legend: Vec<LegendItem> = vec![
+            LegendItem { swatch: "<path d=\"M12 -7Q19 0 12 7M26 -7Q19 0 26 7\" fill=\"none\" stroke=\"#1d1d1b\" stroke-width=\"2\" stroke-linecap=\"round\"/>".into(), label: "Saddle, numbered from the waypoint".into() },
+            LegendItem { swatch: "<path d=\"M19 -6L25 5L13 5Z\" fill=\"#1d1d1b\"/>".into(), label: "Summit, with its height".into() },
+        ];
+        for c in [10, 9, 7, 3, 2, 1, 4, 5] {
+            legend.push(li(analysis::LANDFORMS[c].2, analysis::LANDFORMS[c].0));
+        }
+        let collar = Collar {
+            title: place,
+            subtitle: "Landforms, saddles and summits",
+            notes: &["Landform classes after Weiss: position against the ground within 300 m and within 2 km.", "Saddles are the low gaps in a ridge. Animals cross there, and so does the wind."],
+            legend,
+            credits: &maps::CREDITS,
+        };
+        let sheet = f.compose(&base, &ov, &landform_extra, Some(&collar))?;
+        let bare = f.compose(&base, &ov, &landform_extra, None)?;
+        sv.save(&f, &format!("{prefix}_landform"), "Terrain", &format!("{place}: landforms and saddles"), "The shape of the ground sorted into crests, spurs, benches, basins, draws and gullies, with every saddle and summit marked. Saddles are where animals cross a ridge.", &sheet, &bare, false)?;
+
+        // Wind shelter.
+        let shelter_ramp = Ramp::new(&[(-90.0, "#184f95"), (-10.0, "#3987e5"), (-5.0, "#9ec5f4"), (-2.0, "#f0efec"), (2.0, "#f6c9a8"), (5.0, "#eb6834"), (10.0, "#9c3a12")]);
+        let base = f.base_value(0.76, |lon, lat, _| {
+            let v = world.sample_ra(&shelter, lon, lat);
+            if v.is_nan() || (-2.0..2.0).contains(&v) { None } else { Some(shelter_ramp.step(v)) }
+        });
+        let legend = vec![
+            li("#184f95", "Very exposed"),
+            li("#3987e5", "Exposed"),
+            li("#9ec5f4", "Somewhat exposed"),
+            li("#f0efec", "Neither"),
+            li("#f6c9a8", "Somewhat sheltered"),
+            li("#eb6834", "Sheltered"),
+            li("#9c3a12", "Deep in the lee"),
+        ];
+        let sub = format!("Shelter from a wind out of the {}", geo::compass_words(wind_from as f64));
+        let collar = Collar {
+            title: place,
+            subtitle: &sub,
+            notes: &["After Winstral: the steepest angle up to the ground within 300 m, looking into the wind.", "Orange ground is in the lee: calmer, and where wind-blown snow piles into drifts and slabs. Blue ground takes the wind and blows bare."],
+            legend,
+            credits: &maps::CREDITS,
+        };
+        let sheet = f.compose(&base, &ov, &vantage_extra, Some(&collar))?;
+        let bare = f.compose(&base, &ov, &vantage_extra, None)?;
+        sv.save(&f, &format!("{prefix}_shelter"), "Terrain", &format!("{place}: wind shelter"), "Where the prevailing wind strikes and where the ground gives shelter from it. Animals bed in the lee in a blow; snow drifts there too.", &sheet, &bare, false)?;
+
+        // Height, as layer tints.
+        let tint = Ramp::new(&[(800.0, "#6fa86a"), (1100.0, "#9dc37c"), (1400.0, "#cfdc96"), (1600.0, "#f0e6a4"), (1800.0, "#e8c987"), (1900.0, "#d9a871"), (2000.0, "#c48a62"), (2100.0, "#b39a8c"), (2200.0, "#d8d2cc"), (2400.0, "#ffffff")]);
+        let w_g = f.vg.w;
+        let _ = w_g;
+        let base = f.base_value(0.78, |_, _, i| Some(tint.at((f.terr.z[i] / 100.0).floor() * 100.0)));
+        let legend = [2200.0, 2100.0, 2000.0, 1900.0, 1800.0, 1600.0, 1400.0, 1100.0]
+            .iter()
+            .map(|v: &f32| li(&rgb_hex(tint.at(*v)), &format!("{} m", crate::chart::thousands(*v))))
+            .collect();
+        let tl = format!("Forest gives out near {:.0} m. Colour changes every 100 m.", (stats.treeline / 10.0).round() * 10.0);
+        let collar = Collar { title: place, subtitle: "Height above sea level", notes: &[&tl], legend, credits: &maps::CREDITS };
+        let sheet = f.compose(&base, &ov, &landform_extra, Some(&collar))?;
+        let bare = f.compose(&base, &ov, &landform_extra, None)?;
+        sv.save(&f, &format!("{prefix}_height"), "Terrain", &format!("{place}: height"), "Height shown as bands of colour, 100 m to the band, with the summits and saddles marked. The quickest way to see what is above you and what is below.", &sheet, &bare, false)?;
     }
 
-    Ok(Products { maps: sv.maps, vantages, drive, drive_profile, track_end, walk, walk_profile, walk_out_h, walk_back_h, snow: snow_rows, stats })
+    Ok(Products { maps: sv.maps, vantages, drive, drive_profile, track_end, walk, walk_profile, walk_out_h, walk_back_h, snow: snow_rows, stats, summits, saddles, bands, aspects, landform_share, wind_from, grids })
 }

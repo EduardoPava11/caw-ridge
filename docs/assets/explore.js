@@ -3,42 +3,8 @@
   "use strict";
   var WPT = window.CAW.waypoint, DECL = window.CAW.declination;
 
-  // Transverse Mercator (Krueger series to the third order), enough for a metre.
-  function utm(lat, lon) {
-    var a = 6378137, f = 1 / 298.257222101, k0 = 0.9996;
-    var zone = Math.floor((lon + 180) / 6) + 1;
-    var lon0 = (zone * 6 - 183) * Math.PI / 180;
-    var n = f / (2 - f), n2 = n * n, n3 = n2 * n;
-    var A = a / (1 + n) * (1 + n2 / 4 + n2 * n2 / 64);
-    var al = [n / 2 - 2 / 3 * n2 + 5 / 16 * n3, 13 / 48 * n2 - 3 / 5 * n3, 61 / 240 * n3];
-    var e = Math.sqrt(2 * f - f * f);
-    var p = lat * Math.PI / 180, l = lon * Math.PI / 180 - lon0;
-    var tau = Math.tan(p);
-    var sig = Math.sinh(e * Math.atanh(e * tau / Math.sqrt(1 + tau * tau)));
-    var taup = tau * Math.sqrt(1 + sig * sig) - sig * Math.sqrt(1 + tau * tau);
-    var xi = Math.atan2(taup, Math.cos(l));
-    var eta = Math.asinh(Math.sin(l) / Math.sqrt(taup * taup + Math.cos(l) * Math.cos(l)));
-    var x = eta, y = xi;
-    for (var j = 0; j < 3; j++) {
-      var k = 2 * (j + 1);
-      y += al[j] * Math.sin(k * xi) * Math.cosh(k * eta);
-      x += al[j] * Math.cos(k * xi) * Math.sinh(k * eta);
-    }
-    return { zone: zone, e: 500000 + k0 * A * x, n: k0 * A * y };
-  }
-  function haversine(a, b) {
-    var R = 6371008.8, r = Math.PI / 180;
-    var dp = (b[0] - a[0]) * r, dl = (b[1] - a[1]) * r;
-    var h = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dl / 2) * Math.sin(dl / 2);
-    return 2 * R * Math.asin(Math.sqrt(h));
-  }
-  function bearing(a, b) {
-    var r = Math.PI / 180;
-    var y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r);
-    var x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r);
-    return (Math.atan2(y, x) / r + 360) % 360;
-  }
-  var DIR16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  var T = window.CawTerrain;
+  var utm = T.utm, haversine = T.haversine, bearing = T.bearing, DIR16 = T.DIR16;
 
   var map = L.map("map", { zoomControl: true, minZoom: 9, maxZoom: 17, zoomSnap: 0.25, maxBounds: [[53.3, -120.8], [54.8, -118.0]] });
   map.attributionControl.setPrefix(false);
@@ -74,11 +40,14 @@
     box.appendChild(c);
     return box;
   }
-  var groups = { "Waypoint and glassing points": L.layerGroup(), "Roads, camps and services": L.layerGroup(), "Drive and walking line": L.layerGroup() };
+  var groups = { "Waypoint and glassing points": L.layerGroup(), "Saddles and summits": L.layerGroup(), "Roads, camps and services": L.layerGroup(), "Drive and walking line": L.layerGroup() };
+  var PIN = { waypoint: "", glassing: "g", camp: "c", summit: "t", saddle: "p" };
   window.CAW.places.forEach(function (p) {
-    var cls = p.kind === "waypoint" ? "" : (p.kind === "glassing" ? "g" : (p.kind === "camp" ? "c" : "s"));
+    var cls = PIN[p.kind] === undefined ? "s" : PIN[p.kind];
     var m = L.marker([p.lat, p.lon], { icon: icon(cls), title: p.name, zIndexOffset: p.kind === "waypoint" ? 1000 : 0 }).bindPopup(popup(p));
-    m.addTo(p.kind === "waypoint" || p.kind === "glassing" ? groups["Waypoint and glassing points"] : groups["Roads, camps and services"]);
+    var g = p.kind === "waypoint" || p.kind === "glassing" ? "Waypoint and glassing points" : (p.kind === "summit" || p.kind === "saddle" ? "Saddles and summits" : "Roads, camps and services");
+    m.on("click", function () { describe(p.name, p.lat, p.lon); });
+    m.addTo(groups[g]);
   });
   fetch("data/cawridge.geojson").then(function (r) { return r.json(); }).then(function (g) {
     L.geoJSON(g, {
@@ -95,49 +64,25 @@
     }).addTo(groups["Drive and walking line"]);
   });
   groups["Waypoint and glassing points"].addTo(map);
+  groups["Saddles and summits"].addTo(map);
   groups["Roads, camps and services"].addTo(map);
   L.control.layers(bases, groups, { collapsed: window.innerWidth < 900, position: "topright" }).addTo(map);
   L.control.scale({ imperial: false, maxWidth: 160 }).addTo(map);
   map.fitBounds([[54.02, -119.47], [54.105, -119.31]]);
 
-  // Heights, read from a small image of the elevation model.
-  var elev = null;
-  (function () {
-    var e = window.CAW.elev, im = new Image();
-    im.onload = function () {
-      var c = document.createElement("canvas"); c.width = im.width; c.height = im.height;
-      var ctx = c.getContext("2d", { willReadFrequently: true }); ctx.drawImage(im, 0, 0);
-      elev = { ctx: ctx, w: im.width, h: im.height, b: e };
-    };
-    im.src = e.src;
-  })();
-  function merc(lat) { return Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)); }
-  function height(lat, lon) {
-    if (!elev) { return null; }
-    var b = elev.b;
-    var fx = (lon - b.w) / (b.e - b.w), fy = (merc(b.n) - merc(lat)) / (merc(b.n) - merc(b.s));
-    if (fx < 0 || fy < 0 || fx >= 1 || fy >= 1) { return null; }
-    var d = elev.ctx.getImageData(Math.floor(fx * elev.w), Math.floor(fy * elev.h), 1, 1).data;
-    return d[0] * 256 + d[1] + d[2] / 256 - 32768;
-  }
-
-  var readout = document.querySelector(".readout");
+  // What is known about a point, in the panel at the bottom left.
+  var box = document.querySelector("#info"), wrap = document.querySelector("#infowrap");
+  document.querySelector("[data-close-info]").addEventListener("click", function () { wrap.hidden = true; });
   function describe(title, lat, lon, acc) {
-    var u = utm(lat, lon);
-    var d = haversine([lat, lon], WPT), b = bearing([lat, lon], WPT);
-    var mag = (b - DECL + 360) % 360;
-    var h = height(lat, lon);
-    readout.textContent = "";
-    var t = document.createElement("b"); t.textContent = title; readout.appendChild(t);
-    var lines = [
-      lat.toFixed(5) + ", " + lon.toFixed(5) + (acc ? "  (within " + Math.round(acc) + " m)" : ""),
-      u.zone + "U " + String(Math.round(u.e)).padStart(6, "0") + " E " + Math.round(u.n) + " N",
-      "To waypoint: " + (d < 1000 ? Math.round(d) + " m" : (d / 1000).toFixed(2) + " km") + " at " + Math.round(b) + "° true (" + DIR16[Math.round(b / 22.5) % 16] + "), " + Math.round(mag) + "° magnetic"
-    ];
-    // At the waypoint itself a bearing means nothing.
-    if (d < 1) { lines.pop(); }
-    if (h !== null) { lines.splice(2, 0, "Height " + Math.round(h).toLocaleString("en-CA") + " m"); }
-    lines.forEach(function (s) { var e = document.createElement("div"); e.textContent = s; readout.appendChild(e); });
+    T.ready.then(function () {
+      var rows = T.describe(T.query(lat, lon));
+      if (acc) { rows.unshift({ k: "Accuracy", v: "within " + Math.round(acc) + " m", note: "from your device" }); }
+      T.render(box, title, rows, [
+        { label: "See it in 3D", run: function () { location.href = "terrain3d.html?lat=" + lat.toFixed(5) + "&lon=" + lon.toFixed(5); } },
+        { label: "Stand here", run: function () { location.href = "terrain3d.html?stand=1&lat=" + lat.toFixed(5) + "&lon=" + lon.toFixed(5); } }
+      ]);
+      wrap.hidden = false;
+    });
   }
   var tapped;
   map.on("click", function (e) {
@@ -145,7 +90,15 @@
     tapped = L.circleMarker(e.latlng, { radius: 6, color: "#1d1d1b", weight: 2, fillColor: "#fff", fillOpacity: 1 }).addTo(map);
     describe("Tapped point", e.latlng.lat, e.latlng.lng);
   });
-  describe("Waypoint", WPT[0], WPT[1]);
+  var asked = new URLSearchParams(location.search);
+  if (Number(asked.get("lat")) && Number(asked.get("lon"))) {
+    var ll = L.latLng(Number(asked.get("lat")), Number(asked.get("lon")));
+    tapped = L.circleMarker(ll, { radius: 6, color: "#1d1d1b", weight: 2, fillColor: "#fff", fillOpacity: 1 }).addTo(map);
+    map.setView(ll, 14);
+    describe("Chosen point", ll.lat, ll.lng);
+  } else {
+    describe("Waypoint", WPT[0], WPT[1]);
+  }
 
   // Your position.
   var me, ring, following = false;
@@ -175,8 +128,7 @@
     describe("Your position", e.latlng.lat, e.latlng.lng, e.accuracy);
   });
   map.on("locationerror", function (e) {
-    readout.textContent = "";
-    var t = document.createElement("b"); t.textContent = "Position not available"; readout.appendChild(t);
-    var m = document.createElement("div"); m.textContent = e.message; readout.appendChild(m);
+    T.render(box, "Position not available", [{ k: "Reason", v: e.message, note: "" }], []);
+    wrap.hidden = false;
   });
 })();

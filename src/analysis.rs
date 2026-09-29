@@ -394,3 +394,219 @@ pub fn streams(t: &Terrain, down: &[u32], acc: &[f32], min_km2: f32) -> Vec<(Vec
     }
     out
 }
+
+/// Topographic position index: how far a cell stands above or below the mean height of
+/// its neighbourhood, in standard deviations of that difference over the whole grid.
+/// Positive on ridges and knobs, negative in gullies and valley floors.
+pub fn tpi(t: &Terrain, radius_m: f32) -> Vec<f32> {
+    let (w, h) = (t.w, t.h);
+    // Summed area table, so the window mean costs the same at any radius.
+    let mut sat = vec![0f64; (w + 1) * (h + 1)];
+    for y in 0..h {
+        let mut row = 0f64;
+        for x in 0..w {
+            row += t.z[y * w + x] as f64;
+            sat[(y + 1) * (w + 1) + x + 1] = sat[y * (w + 1) + x + 1] + row;
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let r = (radius_m / t.cell[y]).round().max(1.0) as usize;
+        let (y0, y1) = (y.saturating_sub(r), (y + r + 1).min(h));
+        for (x, v) in row.iter_mut().enumerate() {
+            let (x0, x1) = (x.saturating_sub(r), (x + r + 1).min(w));
+            let sum = sat[y1 * (w + 1) + x1] - sat[y0 * (w + 1) + x1] - sat[y1 * (w + 1) + x0] + sat[y0 * (w + 1) + x0];
+            let n = ((x1 - x0) * (y1 - y0)) as f64;
+            *v = t.z[y * w + x] - (sum / n) as f32;
+        }
+    });
+    let mean = out.par_iter().map(|v| *v as f64).sum::<f64>() / out.len() as f64;
+    let var = out.par_iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / out.len() as f64;
+    let sd = var.sqrt().max(1e-6) as f32;
+    out.par_iter_mut().for_each(|v| *v = (*v - mean as f32) / sd);
+    out
+}
+
+/// The ten landform classes of Weiss (2001), from the position index at a small and a
+/// large radius and the slope. Class numbers are the ones in `LANDFORMS`.
+pub fn landforms(t: &Terrain, small: &[f32], large: &[f32]) -> Vec<u8> {
+    (0..t.w * t.h)
+        .into_par_iter()
+        .map(|i| {
+            let (s, l) = (small[i], large[i]);
+            if s <= -1.0 {
+                if l <= -1.0 { 1 } else if l < 1.0 { 2 } else { 3 }
+            } else if s < 1.0 {
+                if l <= -1.0 {
+                    4
+                } else if l < 1.0 {
+                    if t.slope[i] <= 5.0 { 5 } else { 6 }
+                } else {
+                    7
+                }
+            } else if l <= -1.0 {
+                8
+            } else if l < 1.0 {
+                9
+            } else {
+                10
+            }
+        })
+        .collect()
+}
+
+/// Name, what it means on the ground, and colour of each landform class.
+pub const LANDFORMS: [(&str, &str, &str); 11] = [
+    ("", "", "#dddddd"),
+    ("Deep gully or canyon", "A cut in the floor of a valley. Water, cover, a travel lane out of the wind.", "#1f4e79"),
+    ("Draw on a slope", "A shallow drainage on a hillside. Animals climb and descend in these.", "#4f8fc0"),
+    ("Headwater basin", "A hollow high on the mountain where a stream begins. Feed, water and shelter near the top.", "#7fcdbb"),
+    ("Valley floor", "The broad bottom of a valley.", "#9ecae1"),
+    ("Flat", "Level ground that is neither high nor low.", "#f2f0e6"),
+    ("Open slope", "An even hillside.", "#d9d2b0"),
+    ("Upper slope or bench", "High ground just below the crest, often a shoulder or a bench. Bedding ground with a view.", "#e0a458"),
+    ("Knoll in a valley", "A small rise standing in low ground.", "#c9b04a"),
+    ("Spur or small ridge", "A rib running down a slope. The natural line of ascent.", "#c8553d"),
+    ("Summit or main ridge", "The crest. The best view and the worst wind.", "#7a1f1f"),
+];
+
+pub struct Peak {
+    pub x: usize,
+    pub y: usize,
+    pub z: f32,
+    /// Height above the lowest contour that encircles this summit and no higher one.
+    pub prominence: f32,
+    /// The key saddle: the gap you cross to reach higher ground by the highest route.
+    pub saddle: (usize, usize, f32),
+    /// True if the higher ground lies off the edge of the grid, so the prominence is a
+    /// minimum and the saddle is only the point where the ridge leaves the grid.
+    pub edge: bool,
+}
+
+/// Every summit with its prominence and key saddle, by flooding the grid from the top
+/// down and noting where rising islands join (union-find).
+pub fn summits(t: &Terrain, min_prominence: f32) -> Vec<Peak> {
+    let (w, h, n) = (t.w, t.h, t.w * t.h);
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.par_sort_unstable_by(|a, b| t.z[*b as usize].partial_cmp(&t.z[*a as usize]).unwrap_or(Ordering::Equal));
+    const NONE: u32 = u32::MAX;
+    let mut parent = vec![NONE; n];
+    // Highest cell of each island, kept at the island's root.
+    let mut top = vec![0u32; n];
+    let mut touches_edge = vec![false; n];
+    fn find(parent: &mut [u32], mut i: u32) -> u32 {
+        while parent[i as usize] != i {
+            let p = parent[i as usize];
+            parent[i as usize] = parent[p as usize];
+            i = p;
+        }
+        i
+    }
+    let mut out = Vec::new();
+    for &c in &order {
+        let ci = c as usize;
+        let (x, y) = ((ci % w) as i64, (ci / w) as i64);
+        parent[ci] = c;
+        top[ci] = c;
+        let on_edge = x == 0 || y == 0 || x == w as i64 - 1 || y == h as i64 - 1;
+        let mut roots: Vec<u32> = Vec::with_capacity(4);
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
+                    continue;
+                }
+                let j = ny as usize * w + nx as usize;
+                if parent[j] == NONE {
+                    continue;
+                }
+                let r = find(&mut parent, j as u32);
+                if !roots.contains(&r) {
+                    roots.push(r);
+                }
+            }
+        }
+        if roots.is_empty() {
+            touches_edge[ci] = on_edge;
+            continue;
+        }
+        // The island with the highest top survives; the others end here.
+        roots.sort_by(|a, b| t.z[top[*b as usize] as usize].partial_cmp(&t.z[top[*a as usize] as usize]).unwrap_or(Ordering::Equal));
+        let keep = roots[0];
+        for &r in &roots[1..] {
+            let p = top[r as usize] as usize;
+            let prom = t.z[p] - t.z[ci];
+            if prom >= min_prominence && !touches_edge[r as usize] {
+                out.push(Peak { x: p % w, y: p / w, z: t.z[p], prominence: prom, saddle: (ci % w, ci / w, t.z[ci]), edge: false });
+            }
+            parent[r as usize] = keep;
+            touches_edge[keep as usize] |= touches_edge[r as usize];
+        }
+        parent[ci] = keep;
+        if on_edge && !touches_edge[keep as usize] {
+            // The island has reached the edge of the grid: what lies beyond is unknown.
+            let p = top[keep as usize] as usize;
+            let prom = t.z[p] - t.z[ci];
+            if prom >= min_prominence {
+                out.push(Peak { x: p % w, y: p / w, z: t.z[p], prominence: prom, saddle: (ci % w, ci / w, t.z[ci]), edge: true });
+            }
+            touches_edge[keep as usize] = true;
+        }
+    }
+    out.sort_by(|a, b| b.prominence.partial_cmp(&a.prominence).unwrap_or(Ordering::Equal));
+    out
+}
+
+/// The direction in which a saddle is crossed: the bearing of the lowest ground on a ring
+/// of `radius_m` about it, folded to 0..180, and the drop to that ground on either side.
+pub fn saddle_axis(t: &Terrain, x: usize, y: usize, radius_m: f32) -> (f32, f32, f32) {
+    let r = radius_m / t.cell[y.min(t.h - 1)];
+    let z0 = t.z[y * t.w + x];
+    let mut best = (f32::MAX, 0f32, 0f32, 0f32);
+    for k in 0..36 {
+        let a = (k as f32 * 5.0).to_radians();
+        let (dx, dy) = (a.sin() * r, -a.cos() * r);
+        let one = bilinear(t, x as f32 + dx, y as f32 + dy);
+        let other = bilinear(t, x as f32 - dx, y as f32 - dy);
+        // A pass falls away on both sides along its axis.
+        let score = one.max(other);
+        if score < best.0 {
+            best = (score, k as f32 * 5.0, z0 - one, z0 - other);
+        }
+    }
+    (best.1, best.2, best.3)
+}
+
+/// Wind shelter after Winstral: the steepest upward angle to the terrain looking into the
+/// wind, within `reach_m`. Positive means ground upwind stands above you (sheltered, and
+/// where snow drifts in); negative means you stand above everything upwind (exposed).
+pub fn shelter(t: &Terrain, win: (usize, usize, usize, usize), wind_from_deg: f32, reach_m: f32) -> Vec<f32> {
+    let mut out = vec![f32::NAN; t.w * t.h];
+    // Look into the wind across a 30 degree fan, as the wind itself wanders.
+    let fan: Vec<(f32, f32)> = [-15.0f32, -7.5, 0.0, 7.5, 15.0].iter().map(|d| ((wind_from_deg + d).to_radians().sin(), -(wind_from_deg + d).to_radians().cos())).collect();
+    out.par_chunks_mut(t.w).enumerate().for_each(|(y, row)| {
+        if y < win.1 || y >= win.3 {
+            return;
+        }
+        let cell = t.cell[y];
+        let steps = (reach_m / cell).ceil() as usize;
+        for x in win.0..win.2 {
+            let z0 = t.z[y * t.w + x];
+            let mut sum = 0.0;
+            for (sx, sy) in &fan {
+                let mut best = f32::MIN;
+                for s in 1..=steps {
+                    let d = s as f32;
+                    let z = bilinear(t, x as f32 + sx * d, y as f32 + sy * d);
+                    best = best.max(((z - z0) / (d * cell)).atan().to_degrees());
+                }
+                sum += best;
+            }
+            row[x] = sum / fan.len() as f32;
+        }
+    });
+    out
+}

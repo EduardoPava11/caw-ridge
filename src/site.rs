@@ -12,12 +12,12 @@ use crate::export::{self, Place};
 use crate::geo;
 use crate::products::Products;
 use crate::sun;
-use crate::view::View;
 use crate::world::World;
 
-const NAV: [(&str, &str); 10] = [
+const NAV: [(&str, &str); 11] = [
     ("index.html", "Overview"),
     ("maps.html", "Maps"),
+    ("terrain3d.html", "3D"),
     ("explore.html", "Explore"),
     ("terrain.html", "Terrain"),
     ("access.html", "Access"),
@@ -38,6 +38,16 @@ struct Page<'a> {
     footer: bool,
 }
 
+/// Adds the build stamp to the script and style addresses in a fragment, so that a new
+/// build is never served from an old copy in the browser's cache.
+fn stamp(html: &str, v: &str) -> String {
+    let mut s = html.to_string();
+    for f in ["assets/style.css", "assets/app.js", "assets/viewer.js", "assets/explore.js", "assets/terrain-data.js", "assets/terrain3d.js"] {
+        s = s.replace(&format!("\"{f}\""), &format!("\"{f}?v={v}\""));
+    }
+    s
+}
+
 fn layout(p: &Page, built: &str) -> String {
     let mut nav = String::new();
     for (href, name) in NAV {
@@ -52,7 +62,8 @@ fn layout(p: &Page, built: &str) -> String {
     } else {
         String::new()
     };
-    format!(
+    let v: String = built.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let page = format!(
         "<!doctype html>\n<html lang=\"en-CA\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n<meta name=\"theme-color\" content=\"#1d1d1b\">\n<link rel=\"manifest\" href=\"manifest.webmanifest\">\n<link rel=\"icon\" href=\"assets/icon.svg\" type=\"image/svg+xml\">\n<link rel=\"apple-touch-icon\" href=\"assets/icon-180.png\">\n<link rel=\"preload\" href=\"assets/fonts/BarlowCondensed-Bold.woff2\" as=\"font\" type=\"font/woff2\" crossorigin>\n<link rel=\"stylesheet\" href=\"assets/style.css\">\n{}\n<script>try{{var t=localStorage.getItem('cawridge-theme');if(t)document.documentElement.setAttribute('data-theme',t)}}catch(e){{}}</script>\n</head>\n<body>\n<header class=\"mast\"><div class=\"wrap\"><a class=\"brand\" href=\"index.html\"><b>Caw Ridge</b><span>54.0627 N 119.3907 W</span></a><nav aria-label=\"Sections\">{}</nav><button class=\"theme\" type=\"button\">Night</button></div></header>\n{}\n{}\n<script src=\"assets/app.js\" defer></script>\n{}\n</body>\n</html>\n",
         esc(&title),
         esc(p.description),
@@ -61,7 +72,8 @@ fn layout(p: &Page, built: &str) -> String {
         p.body,
         footer,
         p.scripts
-    )
+    );
+    stamp(&page, &v)
 }
 
 fn date_long(days: i64) -> String {
@@ -112,6 +124,7 @@ pub fn places(world: &World, p: &Products) -> Vec<Place> {
         lat: config::WPT_LAT,
         elev: world.wpt_elev,
         note: "The point this guide is built around. It sits in a high bowl with a short view.".into(),
+        short: "Waypoint".into(),
     }];
     for g in &p.vantages {
         v.push(Place {
@@ -121,16 +134,46 @@ pub fn places(world: &World, p: &Products) -> Vec<Place> {
             lat: g.lat,
             elev: g.elev,
             note: format!("Sees {:.1} km2 of open ground within 3 km. {:.1} km from the waypoint, bearing {:.0} true.", g.open_km2, g.dist_m / 1000.0, g.bearing),
+            short: g.name.clone(),
         });
     }
-    v.push(Place { name: "End of mapped track".into(), kind: "road", lon: p.track_end.0, lat: p.track_end.1, elev: z(p.track_end.0, p.track_end.1), note: "Where the track drawn in OpenStreetMap stops. Riders report old roads along most of the ridge line.".into() });
+    for s in &p.saddles {
+        v.push(Place {
+            name: format!("{} saddle", s.name),
+            kind: "saddle",
+            lon: s.lon,
+            lat: s.lat,
+            elev: s.elev,
+            note: format!(
+                "A gap in the ridge at {:.0} m. The ridge rises {:.0} m beyond it. Crossed on a line running {} to {}. {}",
+                s.elev,
+                s.depth,
+                geo::compass_words(s.axis as f64),
+                geo::compass_words(s.axis as f64 + 180.0),
+                if s.open { "Open ground." } else { "In timber." }
+            ),
+            short: s.name.clone(),
+        });
+    }
+    for s in &p.summits {
+        v.push(Place {
+            name: s.name.clone(),
+            kind: "summit",
+            lon: s.lon,
+            lat: s.lat,
+            elev: s.elev,
+            note: format!("An unnamed top of {:.0} m, standing {}{:.0} m above the gap that joins it to higher ground.", s.elev, if s.edge { "at least " } else { "" }, s.prominence),
+            short: format!("{:.0}", s.elev),
+        });
+    }
+    v.push(Place { name: "End of mapped track".into(), kind: "road", lon: p.track_end.0, lat: p.track_end.1, elev: z(p.track_end.0, p.track_end.1), note: "Where the track drawn in OpenStreetMap stops. Riders report old roads along most of the ridge line.".into(), short: "Track end".into() });
     if let Some(l) = p.drive.iter().find(|l| l.kind == "track") {
         let q = l.pts[0];
-        v.push(Place { name: "Caw Ridge turnoff".into(), kind: "road", lon: q.0, lat: q.1, elev: z(q.0, q.1), note: format!("Leave the gravel here. {:.1} km of old exploration road climbs to the ridge. A staging area is reported at the turnoff.", l.km) });
+        v.push(Place { name: "Caw Ridge turnoff".into(), kind: "road", lon: q.0, lat: q.1, elev: z(q.0, q.1), note: format!("Leave the gravel here. {:.1} km of old exploration road climbs to the ridge. A staging area is reported at the turnoff.", l.km), short: "Turnoff".into() });
     }
     if let Some(l) = p.drive.iter().find(|l| l.kind == "gravel") {
         let q = l.pts[0];
-        v.push(Place { name: "Beaverdam Road turnoff".into(), kind: "road", lon: q.0, lat: q.1, elev: z(q.0, q.1), note: "Leave Highway 40 here, 8 km north of Grande Cache. The road crosses coal mine property: stay on Beaverdam Road.".into() });
+        v.push(Place { name: "Beaverdam Road turnoff".into(), kind: "road", lon: q.0, lat: q.1, elev: z(q.0, q.1), note: "Leave Highway 40 here, 8 km north of Grande Cache. The road crosses coal mine property: stay on Beaverdam Road.".into(), short: "Beaverdam Road".into() });
     }
     for (name, kind, lon, lat, note) in [
         ("Grande Cache", "service", config::TOWN.0, config::TOWN.1, "Fuel, groceries, lodging, tourism centre. Last services."),
@@ -141,7 +184,7 @@ pub fn places(world: &World, p: &Products) -> Vec<Place> {
         ("Smoky River South campground", "camp", -119.158516, 53.890360, "Provincial recreation area, 22 unserviced sites. Usually open to Thanksgiving."),
         ("Sulphur Gates campground", "camp", -119.186183, 53.850132, "Provincial recreation area and Willmore staging. 11 sites, open all year. Firearm discharge permit rules apply here."),
     ] {
-        v.push(Place { name: name.into(), kind, lon, lat, elev: z(lon, lat), note: note.into() });
+        v.push(Place { name: name.into(), kind, lon, lat, elev: z(lon, lat), note: note.into(), short: name.replace(" campground", "").replace("Fuel: ", "") });
     }
     v
 }
@@ -177,7 +220,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     std::fs::create_dir_all(out.join("assets/fonts"))?;
     std::fs::create_dir_all(out.join("data"))?;
     std::fs::create_dir_all(out.join("vendor/leaflet/images"))?;
-    for f in ["style.css", "app.js", "viewer.js", "explore.js", "icon.svg"] {
+    for f in ["style.css", "app.js", "viewer.js", "explore.js", "terrain-data.js", "terrain3d.js", "icon.svg"] {
         std::fs::copy(Path::new("assets/site").join(f), out.join("assets").join(f))?;
     }
     for e in std::fs::read_dir("assets/webfonts")? {
@@ -186,6 +229,10 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     }
     for f in ["leaflet.js", "leaflet.css", "LICENSE", "images/marker-icon.png", "images/marker-icon-2x.png", "images/marker-shadow.png", "images/layers.png", "images/layers-2x.png"] {
         std::fs::copy(Path::new("assets/vendor/leaflet").join(f), out.join("vendor/leaflet").join(f))?;
+    }
+    std::fs::create_dir_all(out.join("vendor/three"))?;
+    for f in ["three.module.min.js", "three.core.min.js", "OrbitControls.js", "LICENSE"] {
+        std::fs::copy(Path::new("assets/vendor/three").join(f), out.join("vendor/three").join(f))?;
     }
     std::fs::write(out.join(".nojekyll"), "")?;
 
@@ -209,15 +256,45 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     // Official boundaries, passed on unchanged for anyone who wants them in their own GIS.
     std::fs::copy("data/vector/wmu.geojson", out.join("data/wmu.geojson"))?;
 
-    // Heights for the explorer, packed into the colour channels of a PNG.
-    let ev = View::new(config::RIDGE, 20.0);
-    let ez = ev.elevation(&world.dem);
-    let mut buf = Vec::with_capacity(ev.w * ev.h * 3);
-    for v in &ez {
-        let t = (v + 32768.0).max(0.0);
-        buf.extend_from_slice(&[(t / 256.0).floor() as u8, (t.floor() % 256.0) as u8, (t.fract() * 256.0) as u8]);
+    // What the terrain grids hold, for the scripts that read them.
+    let sun_day = sun::days_from_civil(config::SUN_DATE.0, config::SUN_DATE.1, config::SUN_DATE.2);
+    let bb = |b: &config::BBox| serde_json::json!({"w": b.w, "s": b.s, "e": b.e, "n": b.n});
+    let mut grid_spec = serde_json::Map::new();
+    for (file, w, h, b) in &p.grids {
+        let name = Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        grid_spec.insert(name, serde_json::json!({"src": file, "w": w, "h": h, "bbox": bb(b)}));
     }
-    image::save_buffer(out.join("data/elev_ridge.png"), &buf, ev.w as u32, ev.h as u32, image::ExtendedColorType::Rgb8)?;
+    if let Some((_, w, h, b)) = p.grids.iter().find(|g| g.0.ends_with("/a.png")) {
+        for n in ["b", "c", "d"] {
+            grid_spec.insert(n.to_string(), serde_json::json!({"src": format!("data/terrain/{n}.png"), "w": w, "h": h, "bbox": bb(b)}));
+        }
+    }
+    let cover_names: serde_json::Map<String, serde_json::Value> = [
+        (1, "Conifer forest"), (2, "Conifer forest"), (5, "Deciduous forest"), (6, "Mixed forest"), (8, "Shrub"), (10, "Grass and alpine tundra"),
+        (11, "Shrub"), (12, "Grass and alpine tundra"), (13, "Rock and bare ground"), (14, "Wetland"), (15, "Cropland"), (16, "Rock and bare ground"),
+        (17, "Built or disturbed"), (18, "Water"), (19, "Snow and ice"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+    .collect();
+    let terrain_manifest = serde_json::json!({
+        "waypoint": [config::WPT_LAT, config::WPT_LON],
+        "declination": (world.declination * 10.0).round() / 10.0,
+        "grids": grid_spec,
+        "cover": cover_names,
+        "open": [8, 10, 11, 12, 13, 14, 15, 16, 17, 19],
+        "landforms": crate::analysis::LANDFORMS.iter().map(|l| serde_json::json!({"name": l.0, "meaning": l.1, "colour": l.2})).collect::<Vec<_>>(),
+        "sunDate": date_short(sun_day),
+        "windWords": geo::compass_words(p.wind_from as f64),
+        "encoding": {
+            "elev": "metres = R * 256 + G + B / 256 - 32768",
+            "a": "R slope in half degrees; G aspect / 1.5, 255 level; B land cover class",
+            "b": "R landform class; G first sun, (clock hour - 4) * 12, 255 none; B hours of sun * 16",
+            "c": "R usual first snow, days after 31 August, 0 none; G walking minutes / 3, 255 none; B bit 0 in view from waypoint, bit 1 view known, bit 2 glassing known, bits 4 to 7 glassing points that see it",
+            "d": "R wind shelter, degrees * 4 + 128, 0 none; G position index at 300 m * 32 + 128; B position index at 2 km * 32 + 128"
+        }
+    });
+    std::fs::write(out.join("data/terrain/terrain.json"), serde_json::to_string(&terrain_manifest)?)?;
 
     let maps_json: Vec<serde_json::Value> = p
         .maps
@@ -329,6 +406,7 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             geo::utm_string(config::WPT_LON, config::WPT_LAT),
             sat_date
         );
+        b.push_str("<div class=\"btnrow\"><a class=\"btn\" href=\"terrain3d.html\">Open the ridge in 3D</a><a class=\"btn ghost\" href=\"explore.html\">Flat map with GPS</a><a class=\"btn ghost\" href=\"maps.html\">All the maps</a></div>");
         b.push_str("<h2>Read this first</h2><ol class=\"stoplist\">");
         let _ = write!(
             b,
@@ -357,31 +435,33 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         b.push_str("<h2>The ground</h2>");
         b.push_str(&map_figure(p, "ridge_topo", "Drawn for this guide from the national 30 m elevation model, with 20 m contours and a 1 km UTM grid."));
         b.push_str("<h2>In this guide</h2><div class=\"cards\">");
+        let maps_text = format!("{} sheets: topographic, satellite, height, slope, aspect, landforms, cover, wind shelter, sun, snow, walking time and what is in view. View, download, print.", p.maps.len());
         for (n, href, title, text) in [
-            ("01", "maps.html", "Maps", "Twenty-eight sheets: topographic, satellite, slope, aspect, cover, sun, snow, walking time and what is in view. View, download, print."),
-            ("02", "explore.html", "Explore", "Every sheet laid over the ground in one interactive map, with your GPS position, grid references and bearings. Works offline once saved."),
-            ("03", "terrain.html", "Terrain", "Where to glass from, what each spot sees, how steep, which way it faces, and how long the walking takes."),
-            ("04", "access.html", "Getting there", "The drive from Grande Cache leg by leg, the climb to the ridge, staging, camping, fuel and distances."),
-            ("05", "regulations.html", "Regulations", "WMU 446 seasons for 2026, the rules particular to the mountains, licences, registration and who to call."),
-            ("06", "wildlife.html", "Wildlife", "Goats, sheep, caribou, grizzly, elk, moose and deer: what lives here, what is protected, and when the rut runs."),
-            ("07", "weather.html", "Weather", "Live forecast, the climate of ten autumns at ridge height, first snow by year, legal light for every day to the end of November."),
-            ("08", "safety.html", "Safety", "Bears and meat care, emergency numbers, the hospital, communications, and a packing list that remembers your ticks."),
+            ("01", "terrain3d.html", "The ridge in 3D", "Turn the ground in your hands. Drape any map over it, stand on any spot and look around, raise the glass, measure a shot, and tap anywhere to learn what is there."),
+            ("02", "maps.html", "Maps", maps_text.as_str()),
+            ("03", "explore.html", "Explore", "Every sheet laid over the ground in one flat map, with your GPS position. Tap anywhere for height, slope, cover, landform, sun, snow and bearings. Works offline once saved."),
+            ("04", "terrain.html", "Terrain", "Where to glass from, the saddles animals cross, the summits, the benches and basins, how steep, which way it faces, where the wind strikes, and how long the walking takes."),
+            ("05", "access.html", "Getting there", "The drive from Grande Cache leg by leg, the climb to the ridge, staging, camping, fuel and distances."),
+            ("06", "regulations.html", "Regulations", "WMU 446 seasons for 2026, the rules particular to the mountains, licences, registration and who to call."),
+            ("07", "wildlife.html", "Wildlife", "Goats, sheep, caribou, grizzly, elk, moose and deer: what lives here, what is protected, and when the rut runs."),
+            ("08", "weather.html", "Weather", "Live forecast, the climate of ten autumns at ridge height, first snow by year, legal light for every day to the end of November."),
+            ("09", "safety.html", "Safety", "Bears and meat care, emergency numbers, the hospital, communications, and a packing list that remembers your ticks."),
         ] {
             let _ = write!(b, "<a class=\"card plain\" href=\"{href}\"><div class=\"body\"><span class=\"num\">{n}</span><h3>{title}</h3><p>{text}</p></div></a>");
         }
         b.push_str("</div>");
-        b.push_str("<h2>Take it with you</h2><p>There is no signal on the ridge. Save the guide to your phone before you leave town: every page, every map and the explorer will then open with no connection.</p><div class=\"btnrow\"><button class=\"btn\" type=\"button\" data-save-offline>Save everything for offline use</button><a class=\"btn ghost\" href=\"data/cawridge.gpx\" download>GPX for your GPS</a><a class=\"btn ghost\" href=\"maps/ridge_topo.png\" download>Print map (PNG)</a></div><p class=\"small\" data-save-status>About 120 MB. Use wifi.</p>");
+        b.push_str("<h2>Take it with you</h2><p>There is no signal on the ridge. Save the guide to your phone before you leave town: every page, every map and the explorer will then open with no connection.</p><div class=\"btnrow\"><button class=\"btn\" type=\"button\" data-save-offline>Save everything for offline use</button><a class=\"btn ghost\" href=\"data/cawridge.gpx\" download>GPX for your GPS</a><a class=\"btn ghost\" href=\"maps/ridge_topo.png\" download>Print map (PNG)</a></div><p class=\"small\" data-save-status>About 150 MB. Use wifi.</p>");
         b.push_str("</main>");
         emit(Page { slug: "index.html", title: "Overview", description: "A hunter's field guide to Caw Ridge, Alberta: maps, terrain analysis, regulations for WMU 446, access, wildlife, weather and safety.", body: b, head: "", scripts: "", footer: true });
     }
 
     // ---------------------------------------------------------------- maps
     {
-        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Maps</p><h1>Twenty-eight sheets</h1><p class=\"lede\">Every map here was drawn for this guide by one program, from open data, at three scales: the region, the ridge, and the ground around the waypoint. Open a sheet to pan and zoom, download it to print, or see it over the ground in the explorer.</p></div>");
+        let mut b = format!("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Maps</p><h1>{} sheets</h1><p class=\"lede\">Every map here was drawn for this guide by one program, from open data, at three scales: the region, the ridge, and the ground around the waypoint. Open a sheet to pan and zoom, download it to print, see it over the ground in the explorer, or drape it over the <a href=\"terrain3d.html\">ridge in 3D</a>.</p></div>", p.maps.len());
         for (group, intro) in [
             ("Topographic", "The working maps. Contours, streams, roads, the UTM grid and ground cover as a quiet tint. These are the ones to print."),
             ("Satellite", "A cloud free pass of the Sentinel-2 satellite, at 10 m to the pixel, in natural colour and in colour infrared."),
-            ("Terrain", "Steepness, the way slopes face, what grows on them, and how long the walking takes."),
+            ("Terrain", "Height, steepness, the way slopes face, the shape of the ground, what grows on it, where the wind strikes, and how long the walking takes."),
             ("Glassing", "What can be seen from where. Computed sight lines from the elevation model."),
             ("Sun and snow", "Where the morning sun lands first, how long each slope is lit, and when the snow usually comes."),
             ("Wildlife and land", "Provincial wildlife ranges, and the coal leases and mine roads that shape where you may go."),
@@ -390,11 +470,12 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             for m in p.maps.iter().filter(|m| m.group == group) {
                 let _ = write!(
                     b,
-                    "<div class=\"card\"><a class=\"cover\" href=\"viewer.html?m={id}\"><img src=\"maps/thumb/{id}.jpg\" alt=\"{t}\" loading=\"lazy\" width=\"640\" height=\"480\"></a><div class=\"body\"><h3>{t}</h3><p>{bl}</p><div class=\"links\"><a href=\"viewer.html?m={id}\">View</a><a href=\"{dl}\" download>Download</a><a href=\"explore.html?layer={id}\">On the ground</a></div></div></div>",
+                    "<div class=\"card\"><a class=\"cover\" href=\"viewer.html?m={id}\"><img src=\"maps/thumb/{id}.jpg\" alt=\"{t}\" loading=\"lazy\" width=\"640\" height=\"480\"></a><div class=\"body\"><h3>{t}</h3><p>{bl}</p><div class=\"links\"><a href=\"viewer.html?m={id}\">View</a><a href=\"{dl}\" download>Download</a><a href=\"explore.html?layer={id}\">On the ground</a>{d3}</div></div></div>",
                     id = m.id,
                     t = esc(&m.title),
                     bl = esc(&m.blurb),
-                    dl = m.download
+                    dl = m.download,
+                    d3 = if m.id.starts_with("region") { String::new() } else { format!("<a href=\"terrain3d.html?layer={}&amp;area={}\">In 3D</a>", m.id.split('_').nth(1).unwrap_or(""), m.id.split('_').next().unwrap_or("")) }
                 );
             }
             b.push_str("</div>");
@@ -434,6 +515,9 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             layer("Slope angle", &["region_topo", "ridge_slope", "close_slope"]),
             layer("Aspect", &["region_topo", "ridge_aspect", "close_aspect"]),
             layer("Ground cover", &["region_topo", "ridge_cover", "close_cover"]),
+            layer("Landforms and saddles", &["region_topo", "ridge_landform", "close_landform"]),
+            layer("Height", &["region_topo", "ridge_height", "close_height"]),
+            layer("Wind shelter", &["region_topo", "ridge_shelter", "close_shelter"]),
             layer("Glassing points", &["region_topo", "ridge_glass", "close_glass"]),
             layer("In view from the waypoint", &["region_topo", "ridge_view", "close_view"]),
             layer("Walking time", &["region_topo", "ridge_walk", "close_walk"]),
@@ -449,17 +533,84 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             "declination": (world.declination * 10.0).round() / 10.0,
             "maps": maps_obj,
             "layers": layers,
-            "places": pl,
-            "elev": {"src": "data/elev_ridge.png", "w": config::RIDGE.w, "s": config::RIDGE.s, "e": config::RIDGE.e, "n": config::RIDGE.n}
+            "places": pl
         });
-        let b = "<div id=\"map\" aria-label=\"Interactive map of Caw Ridge\"></div><div class=\"readout\" aria-live=\"polite\"></div>".to_string();
-        let scripts = format!("<script>window.CAW={};</script><script src=\"vendor/leaflet/leaflet.js\"></script><script src=\"assets/explore.js\"></script>", caw.to_string().replace("</", "<\\/"));
+        let b = "<div id=\"map\" aria-label=\"Interactive map of Caw Ridge\"></div><div class=\"side low\"><section class=\"card3\" id=\"infowrap\" hidden aria-live=\"polite\"><button type=\"button\" class=\"x\" data-close-info>Close</button><div id=\"info\"></div></section></div>".to_string();
+        let scripts = format!("<script>window.CAW={};</script><script src=\"assets/terrain-data.js\"></script><script src=\"vendor/leaflet/leaflet.js\"></script><script src=\"assets/explore.js\"></script>", caw.to_string().replace("</", "<\\/"));
         emit(Page { slug: "explore.html", title: "Explore", description: "An interactive map of Caw Ridge with every sheet of this guide, your GPS position, grid references and bearings.", body: b, head: "<link rel=\"stylesheet\" href=\"vendor/leaflet/leaflet.css\">", scripts: &scripts, footer: false });
+    }
+
+    // ------------------------------------------------------------------ 3D
+    {
+        let names: [(&str, &str, &str); 15] = [
+            ("topo", "Topographic", "Contours, streams, roads and ground cover."),
+            ("sat", "Satellite", "What the eye would see from above."),
+            ("cir", "Colour infrared", "The redder, the greener the growth."),
+            ("height", "Height", "Bands of colour, 100 m to the band."),
+            ("slope", "Slope angle", "Green is steady walking; red and purple are escape terrain."),
+            ("aspect", "Aspect", "Warm colours face the sun, cool colours face away."),
+            ("landform", "Landforms and saddles", "Crests, spurs, benches, basins, draws and gullies."),
+            ("cover", "Ground cover", "Timber, shrub, tundra and rock."),
+            ("shelter", "Wind shelter", "Orange is in the lee of the prevailing wind; blue takes it."),
+            ("glass", "Glassing points", "How many of the eight glassing points see each piece of ground."),
+            ("view", "In view from the waypoint", "Yellow is seen from the waypoint; dark is hidden."),
+            ("walk", "Walking time", "Time to walk out from the waypoint."),
+            ("sunrise", "First sun", "When direct sun first arrives."),
+            ("sunhours", "Hours of sun", "Dark ground stays cold and keeps its snow."),
+            ("snow", "First snow", "The usual date of the first lasting snow."),
+        ];
+        let layers: Vec<serde_json::Value> = names
+            .iter()
+            .filter(|n| p.maps.iter().any(|m| m.id == format!("ridge_{}", n.0)))
+            .map(|n| serde_json::json!({"id": n.0, "name": n.1, "blurb": n.2, "ridge": format!("maps/bare/ridge_{}.jpg", n.0), "close": format!("maps/bare/close_{}.jpg", n.0)}))
+            .collect();
+        let pl: Vec<serde_json::Value> = places.iter().map(|q| serde_json::json!({"name": q.name, "short": q.short, "kind": q.kind, "lat": q.lat, "lon": q.lon, "elev": q.elev.round(), "note": q.note})).collect();
+        let mut routes: Vec<serde_json::Value> = p.drive.iter().map(|l| serde_json::json!({"kind": "drive", "pts": l.pts.iter().map(|q| vec![q.0, q.1]).collect::<Vec<_>>()})).collect();
+        routes.push(serde_json::json!({"kind": "walk", "pts": p.walk.iter().map(|q| vec![q.0, q.1]).collect::<Vec<_>>()}));
+        let bb = |b: &config::BBox| serde_json::json!({"w": b.w, "s": b.s, "e": b.e, "n": b.n});
+        let caw = serde_json::json!({
+            "waypoint": [config::WPT_LAT, config::WPT_LON],
+            "declination": (world.declination * 10.0).round() / 10.0,
+            "eye": config::EYE_M,
+            "animal": config::ANIMAL_M,
+            "areas": {"close": {"elev": "elev_close", "bbox": bb(&config::CLOSE)}, "ridge": {"elev": "elev_ridge", "bbox": bb(&config::RIDGE)}},
+            "layers": layers,
+            "places": pl,
+            "routes": routes
+        });
+        let b = "<div id=\"view3d\" aria-label=\"Three dimensional view of Caw Ridge. Drag to turn, pinch or scroll to zoom, tap the ground to ask about it.\"></div>\
+<section class=\"p3\" id=\"panel\" aria-label=\"View controls\">\
+<div class=\"head\"><h2>The ridge in 3D</h2><button type=\"button\" data-fold aria-expanded=\"true\" aria-controls=\"panel\">Controls</button></div>\
+<div class=\"seg\" role=\"group\" aria-label=\"Area\"><button type=\"button\" data-area=\"close\" aria-pressed=\"true\">Near the waypoint</button><button type=\"button\" data-area=\"ridge\" aria-pressed=\"false\">Whole ridge</button></div>\
+<label class=\"row\"><span>Map</span><select id=\"layer\"></select></label>\
+<p class=\"small\" data-blurb></p>\
+<label class=\"row\"><span>Relief</span><input type=\"range\" id=\"exag\" min=\"1\" max=\"3\" step=\"0.1\" value=\"1.5\" aria-label=\"Vertical exaggeration\"><output data-exag></output></label>\
+<div class=\"row\"><span>Look from</span><div class=\"btns\"><button type=\"button\" data-view=\"south\">South</button><button type=\"button\" data-view=\"west\">West</button><button type=\"button\" data-view=\"north\">North</button><button type=\"button\" data-view=\"east\">East</button><button type=\"button\" data-view=\"above\">Above</button><button type=\"button\" data-view=\"near\">Close</button></div></div>\
+<fieldset><legend>Show</legend>\
+<label><input type=\"checkbox\" data-show=\"points\" checked> Waypoint and glassing points</label>\
+<label><input type=\"checkbox\" data-show=\"shape\" checked> Saddles and summits</label>\
+<label><input type=\"checkbox\" data-show=\"other\" checked> Roads and camps</label>\
+<label><input type=\"checkbox\" data-show=\"routes\" checked> Drive and walking line</label></fieldset>\
+<fieldset><legend>Light</legend>\
+<label><input type=\"checkbox\" id=\"sun\"> Real sun and cast shadows</label>\
+<div data-sun-only hidden><label class=\"row\"><span>Date</span><input type=\"date\" id=\"date\"></label>\
+<label class=\"row\"><span>Time</span><input type=\"range\" id=\"time\" min=\"300\" max=\"1320\" step=\"5\" value=\"540\" aria-label=\"Time of day\"></label>\
+<p class=\"small\">Shadows are true at a relief of 1. Turning the sun on sets it.</p></div>\
+<p class=\"small\" data-sun-says></p></fieldset>\
+<p class=\"small\">Drag to turn. Pinch or scroll to zoom. Two fingers, or the right button, to move. Tap the ground to ask about it, then stand on it or measure from it.</p>\
+<p class=\"small\" data-mesh></p><p class=\"small\" data-loading>Loading the terrain</p></section>\
+<div class=\"side\"><section class=\"card3\" id=\"infowrap\" hidden aria-live=\"polite\"><button type=\"button\" class=\"x\" data-close-info>Close</button><div id=\"info\"></div></section><section class=\"card3\" id=\"measure\" hidden aria-live=\"polite\"></section></div>\
+<div id=\"standbar\" hidden><div><b data-standing></b><span data-heading></span><span class=\"small\">Drag to look around. Pinch or scroll to raise the glass. Tap ground to ask about it.</span></div><button type=\"button\" data-leave>Back to the air</button></div>\
+<div class=\"compass\" aria-hidden=\"true\"><div data-needle><span>N</span></div></div>"
+            .to_string();
+        let head = "<script type=\"importmap\">{\"imports\":{\"three\":\"./vendor/three/three.module.min.js\",\"three/addons/controls/OrbitControls.js\":\"./vendor/three/OrbitControls.js\"}}</script>";
+        let scripts = format!("<script>window.CAW3D={};</script><script src=\"assets/terrain-data.js\"></script><script type=\"module\" src=\"assets/terrain3d.js\"></script>", caw.to_string().replace("</", "<\\/"));
+        emit(Page { slug: "terrain3d.html", title: "3D", description: "Caw Ridge in three dimensions: turn the terrain, drape any map over it, stand on the ground, measure shots and sight lines, and ask about any point.", body: b, head, scripts: &scripts, footer: false });
     }
 
     // ------------------------------------------------------------- terrain
     {
-        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Terrain</p><h1>Reading the ridge</h1><p class=\"lede\">The elevation model is more than a picture. Run sight lines across it and it tells you where to sit; run the sun across it and it tells you which slope warms first; run a walker across it and it tells you how far a pack-out will be.</p></div>");
+        let mut b = String::from("<main class=\"wrap\"><div class=\"pagehead\"><p class=\"kicker\">Terrain</p><h1>Reading the ridge</h1><p class=\"lede\">The elevation model is more than a picture. Run sight lines across it and it tells you where to sit; run the sun across it and it tells you which slope warms first; flood it from the top down and it gives up every summit and every saddle.</p><div class=\"btnrow\"><a class=\"btn\" href=\"terrain3d.html\">Open the ridge in 3D</a><a class=\"btn ghost\" href=\"explore.html\">Ask the flat map</a></div><p class=\"small\">In either one, tap any piece of ground to learn its height, slope, aspect, landform, cover, shelter, sun, snow, walking time and whether it can be seen.</p></div>");
         let _ = write!(
             b,
             "<dl class=\"facts\">\
@@ -487,12 +638,12 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         );
         b.push_str(&map_figure(p, "close_view", "Yellow is in view from the waypoint, dark is hidden. Yellow diamonds are the glassing points."));
         b.push_str("<h2>Where to glass from</h2><p>The program tried a candidate every 180 m across the close sheet, let each one shuffle to the highest ground nearby, and counted the open ground it could see between 300 m and 3 km with an eye 1.7 m up and an animal's back 1.0 m up. Timber was left out of the count: you cannot glass into it. The eight best, kept at least 700 m apart:</p>");
-        b.push_str("<div class=\"scroll\"><table><thead><tr><th>Point</th><th class=\"n\">Open ground in view</th><th class=\"n\">Share of open ground</th><th class=\"n\">Height</th><th class=\"n\">From waypoint</th><th>Bearing</th><th>Latitude, longitude</th><th>UTM 11U</th></tr></thead><tbody>");
+        b.push_str("<div class=\"scroll\"><table><thead><tr><th>Point</th><th class=\"n\">Open ground in view</th><th class=\"n\">Share of open ground</th><th class=\"n\">Height</th><th class=\"n\">From waypoint</th><th>Bearing</th><th>Latitude, longitude</th><th>UTM 11U</th><th>See it</th></tr></thead><tbody>");
         for v in &p.vantages {
             let u = geo::Utm::new(11).forward(v.lon, v.lat);
             let _ = write!(
                 b,
-                "<tr><td><b>{}</b></td><td class=\"n\">{:.1} km&sup2;</td><td class=\"n\">{}</td><td class=\"n\">{} m</td><td class=\"n\">{:.1} km</td><td>{:.0}&deg; {}</td><td class=\"mono\">{:.5}, {:.5}</td><td class=\"mono\">{:06.0} E {:.0} N</td></tr>",
+                "<tr><td><b>{}</b></td><td class=\"n\">{:.1} km&sup2;</td><td class=\"n\">{}</td><td class=\"n\">{} m</td><td class=\"n\">{:.1} km</td><td>{:.0}&deg; {}</td><td class=\"mono\">{:.5}, {:.5}</td><td class=\"mono\">{:06.0} E {:.0} N</td><td><a href=\"terrain3d.html?stand=1&amp;lat={:.5}&amp;lon={:.5}\">Stand here</a></td></tr>",
                 v.name,
                 v.open_km2,
                 pct(v.share),
@@ -503,7 +654,9 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
                 v.lat,
                 v.lon,
                 u.0,
-                u.1
+                u.1,
+                v.lat,
+                v.lon
             );
         }
         b.push_str("</tbody></table></div>");
@@ -520,6 +673,114 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
             world.declination
         );
         b.push_str(&map_figure(p, "close_glass", "The glassing points and how many of them see each piece of ground."));
+
+
+        // Saddles and summits.
+        b.push_str("<h2>Saddles: where the ridge is crossed</h2><p>A saddle is the low gap between two higher parts of a ridge. Animals moving from one basin to the next take the gap rather than climb the crest, the wind funnels through it, and a hunter who sits where he can watch one has the traffic of two valleys in front of him.</p><p>These were found by flooding the elevation model from the top down. Each time two rising islands of ground join, the point where they touch is a saddle, and the height the lower island had reached above it says how much of a gap it is. Saddles are numbered outward from the waypoint.</p>");
+        b.push_str("<div class=\"scroll\"><table><thead><tr><th>Saddle</th><th class=\"n\">Height</th><th class=\"n\">Ridge rises beyond by</th><th>Line of crossing</th><th>Ground</th><th class=\"n\">From waypoint</th><th>Bearing</th><th>Latitude, longitude</th><th>UTM 11U</th><th>See it</th></tr></thead><tbody>");
+        for s in &p.saddles {
+            let u = geo::Utm::new(11).forward(s.lon, s.lat);
+            let _ = write!(
+                b,
+                "<tr><td><b>{}</b></td><td class=\"n\">{} m</td><td class=\"n\">{:.0} m</td><td>{} to {}</td><td>{}</td><td class=\"n\">{:.1} km</td><td>{:.0}&deg; {}</td><td class=\"mono\">{:.5}, {:.5}</td><td class=\"mono\">{:06.0} E {:.0} N</td><td><a href=\"terrain3d.html?stand=1&amp;lat={:.5}&amp;lon={:.5}\">Stand here</a></td></tr>",
+                s.name,
+                chart::thousands(s.elev),
+                s.depth,
+                geo::compass_words(s.axis as f64),
+                geo::compass_words(s.axis as f64 + 180.0),
+                if s.open { "Open" } else { "Timber" },
+                s.dist_m / 1000.0,
+                s.bearing,
+                geo::compass(s.bearing),
+                s.lat,
+                s.lon,
+                u.0,
+                u.1,
+                s.lat,
+                s.lon
+            );
+        }
+        b.push_str("</tbody></table></div>");
+        if let Some(s) = p.saddles.iter().filter(|s| s.open).max_by(|a, c| a.depth.partial_cmp(&c.depth).unwrap()) {
+            let _ = write!(
+                b,
+                "<div class=\"notice\"><h3>Reading the table</h3><p>The most marked gap in open ground is <b>{}</b>, at {} m, {:.1} km from the waypoint at {:.0}&deg; true. The ridge climbs {:.0} m again on its lower side, and the gap is crossed on a line running {} to {}. The line of crossing is the way through; the ridge itself runs across it.</p><p>The model's cell is 30 m, so a saddle is placed to within a cell or two and a gap narrower than that may be missed. The drop on either side over the first 150 m is {:.0} m and {:.0} m.</p></div>",
+                s.name,
+                chart::thousands(s.elev),
+                s.dist_m / 1000.0,
+                s.bearing,
+                s.depth,
+                geo::compass_words(s.axis as f64),
+                geo::compass_words(s.axis as f64 + 180.0),
+                s.drop.0,
+                s.drop.1
+            );
+        }
+        b.push_str(&map_figure(p, "close_landform", "Saddles are drawn as two facing arcs, summits as triangles with their height. The colours are the landform classes below."));
+        b.push_str("<h2>Summits</h2><p>Every top on the close sheet that stands at least 30 m above the gap joining it to higher ground. None of them has an official name, so each is called by its height, as surveyors do. Prominence is that height above the gap: a top with 100 m of it is a hill in its own right; one with 30 m is a knob on a ridge.</p>");
+        b.push_str("<div class=\"scroll\"><table><thead><tr><th>Summit</th><th class=\"n\">Height</th><th class=\"n\">Prominence</th><th>Ground</th><th class=\"n\">From waypoint</th><th>Bearing</th><th>Latitude, longitude</th><th>UTM 11U</th><th>See it</th></tr></thead><tbody>");
+        for s in &p.summits {
+            let u = geo::Utm::new(11).forward(s.lon, s.lat);
+            let _ = write!(
+                b,
+                "<tr><td><b>{}</b></td><td class=\"n\">{} m</td><td class=\"n\">{}{:.0} m</td><td>{}</td><td class=\"n\">{:.1} km</td><td>{:.0}&deg; {}</td><td class=\"mono\">{:.5}, {:.5}</td><td class=\"mono\">{:06.0} E {:.0} N</td><td><a href=\"terrain3d.html?stand=1&amp;lat={:.5}&amp;lon={:.5}\">Stand here</a></td></tr>",
+                esc(&s.name),
+                chart::thousands(s.elev),
+                if s.edge { "over " } else { "" },
+                s.prominence,
+                if s.open { "Open" } else { "Timber" },
+                s.dist_m / 1000.0,
+                s.bearing,
+                geo::compass(s.bearing),
+                s.lat,
+                s.lon,
+                u.0,
+                u.1,
+                s.lat,
+                s.lon
+            );
+        }
+        b.push_str("</tbody></table></div><p class=\"small\">Where the prominence reads \"over\", the higher ground lies beyond the edge of the data and the true figure is larger.</p>");
+
+        // Landforms.
+        b.push_str("<h2>The shape of the ground</h2><div class=\"cols\"><div>");
+        let order = [10usize, 9, 7, 6, 5, 3, 2, 4, 1, 8];
+        let bars: Vec<Bar> = order
+            .iter()
+            .filter(|c| p.landform_share[**c] >= 0.003)
+            .map(|c| {
+                let l = crate::analysis::LANDFORMS[*c];
+                Bar { label: l.0.to_string(), value: p.landform_share[*c], text: pct(p.landform_share[*c]), tip: format!("{}|{} of the close sheet|{}", l.0, pct(p.landform_share[*c]), l.1) }
+            })
+            .collect();
+        let _ = write!(b, "<div class=\"viz\"><h3>Landforms around the waypoint</h3><p class=\"sub\">Share of the close sheet in each class, from the crest down</p>{}</div>", chart::bars("Share of ground by landform class", &bars));
+        b.push_str("</div><div><p>Each cell of the model is compared with the ground about it twice: within 300 m, which says whether it is a local high or low, and within 2 km, which says whether it is high or low on the mountain. The two answers together, with the slope, sort the ground into classes a hunter already knows by eye.</p><ul>");
+        for c in [7usize, 3, 2, 9] {
+            let l = crate::analysis::LANDFORMS[c];
+            let _ = write!(b, "<li><b>{}.</b> {}</li>", l.0, l.1);
+        }
+        b.push_str("</ul><p>Classes after Weiss (2001). Tap any point in the 3D view or the explorer to see its class.</p></div></div>");
+
+        // Height.
+        b.push_str("<h2>Height</h2><div class=\"cols\"><div>");
+        let bars: Vec<Bar> = p
+            .bands
+            .iter()
+            .rev()
+            .filter(|b| b.1 >= 0.002)
+            .map(|(z, s)| Bar { label: format!("{} to {} m", chart::thousands(*z), chart::thousands(z + 100.0)), value: *s, text: pct(*s), tip: format!("{} to {} m|{} of the close sheet", chart::thousands(*z), chart::thousands(z + 100.0), pct(*s)) })
+            .collect();
+        let _ = write!(b, "<div class=\"viz\"><h3>How much ground at each height</h3><p class=\"sub\">Share of the close sheet in each 100 m band, highest first</p>{}</div>", chart::bars("Share of ground by height band", &bars));
+        let above: f32 = p.bands.iter().filter(|b| b.0 >= (p.stats.treeline / 100.0).floor() * 100.0).map(|b| b.1).sum();
+        let _ = write!(
+            b,
+            "</div><div><p>The close sheet runs from {} m in the creek bottoms to {} m on the highest top. Your waypoint, at {} m, is near the upper end: {} of the sheet lies at or above the band where the forest gives out.</p><p>Height is the first thing that sorts animals in autumn. Goats and sheep hold the top bands near steep ground. Elk and mule deer work the edge of the timber and drop as the snow deepens. Moose stay low, in the willow.</p></div></div>",
+            chart::thousands(p.bands.first().map(|b| b.0).unwrap_or(0.0)),
+            chart::thousands(p.bands.last().map(|b| b.0 + 100.0).unwrap_or(0.0)),
+            chart::thousands(world.wpt_elev),
+            pct(above)
+        );
+        b.push_str(&map_figure(p, "close_height", "Height in 100 m bands, with summits and saddles."));
 
         b.push_str("<h2>Steepness</h2><div class=\"cols\"><div>");
         let bars: Vec<Bar> = p.stats.slope_3km.iter().map(|s| Bar { label: s.0.clone(), value: s.1, text: pct(s.1), tip: format!("{}|{} of the ground within 3 km", s.0, pct(s.1)) }).collect();
@@ -552,6 +813,18 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
         b.push_str(&map_figure(p, "close_sunrise", "When direct sun first reaches each slope."));
         b.push_str(&map_figure(p, "close_aspect", "Which way each slope faces."));
         b.push_str("</div>");
+
+
+        // Aspect and wind shelter.
+        let names8 = ["North", "North-east", "East", "South-east", "South", "South-west", "West", "North-west"];
+        let bars: Vec<Bar> = names8.iter().zip(p.aspects).map(|(n, s)| Bar { label: format!("Faces {}", n.to_lowercase()), value: s, text: pct(s), tip: format!("Faces {}|{} of the sloping ground", n.to_lowercase(), pct(s)) }).collect();
+        let _ = write!(b, "<div class=\"viz\"><h3>Which way the slopes face</h3><p class=\"sub\">Share of sloping ground on the close sheet by the direction it faces</p>{}</div>", chart::bars("Share of sloping ground by aspect", &bars));
+        let _ = write!(
+            b,
+            "<h2>Wind and shelter</h2><p>The wind on this ridge comes from the {} more than from anywhere else. For every cell, the program looks into that wind for 300 m and takes the steepest angle up to the ground it finds. Where ground upwind stands above you, you are in its lee; where you stand above everything upwind, you take the wind in the face.</p><p>The lee is where animals lie up in a blow, and where you can glass without your eyes streaming. It is also where wind-blown snow comes to rest, so the orange slopes are the ones that load into drifts and slabs after a storm.</p>",
+            geo::compass_words(p.wind_from as f64)
+        );
+        b.push_str(&map_figure(p, "close_shelter", "Orange is sheltered from the prevailing wind, blue is exposed to it."));
 
         let _ = write!(
             b,
@@ -948,7 +1221,8 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
 <tr><td>Access directions</td><td><a href=\"https://mdgreenview.ab.ca/tourism/quadding-and-snowmobiling/\">Municipal District of Greenview</a></td><td>Road reports from public forum threads, 2008 to 2023, marked as such where used.</td></tr>\
 <tr><td>Bear safety</td><td><a href=\"https://www.alberta.ca/bears-and-hunters\">Government of Alberta, Bears and hunters</a></td><td></td></tr>\
 <tr><td>Map lettering and site type</td><td>Barlow by Jeremy Tribby, PT Serif by ParaType, IBM Plex Mono by IBM</td><td>SIL Open Font Licence.</td></tr>\
-<tr><td>Interactive map</td><td><a href=\"https://leafletjs.com/\">Leaflet</a></td><td>BSD 2-Clause licence.</td></tr></tbody></table></div>", sat_date, esc(&world.sat_ridge.scenes.join(", ")));
+<tr><td>Interactive map</td><td><a href=\"https://leafletjs.com/\">Leaflet</a></td><td>BSD 2-Clause licence.</td></tr>\
+<tr><td>3D view</td><td><a href=\"https://threejs.org/\">three.js</a></td><td>MIT licence.</td></tr></tbody></table></div>", sat_date, esc(&world.sat_ridge.scenes.join(", ")));
         b.push_str("<h2>How the maps are made</h2><p>One program, <code>cawridge</code>, written in Rust, does all of it. It has two commands. <code>cawridge fetch</code> downloads the data; <code>cawridge build</code> draws the maps and writes the site.</p><ul>\
 <li><b>Reading the elevation.</b> The national elevation model is a single file of several hundred gigabytes. It is stored so that any window can be read without the rest: the program asks the server for the index, then for only the 36 tiles that cover the region. It takes about three seconds. The projection from latitude and longitude to the file's Lambert grid is worked out in the program and tested against the PROJ library.</li>\
 <li><b>Relief.</b> Slope and aspect by Horn's method; shading from four lights so that slopes facing away from the main light keep their form.</li>\
@@ -957,6 +1231,10 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
 <li><b>Sight lines.</b> For each target cell the ground between it and the eye is checked against the straight line between them, allowing for the curve of the earth and the bending of light. Eye at 1.7 m, target at 1.0 m.</li>\
 <li><b>Sun.</b> The sun's position every ten minutes from the NOAA solar equations; a ray marched from each cell towards it until it clears the highest ground or strikes a slope.</li>\
 <li><b>Walking time.</b> Dijkstra's algorithm over the grid with Tobler's hiking function as the cost.</li>\
+<li><b>Summits and saddles.</b> The grid is flooded from the highest cell down, joining cells into islands. Where two islands meet is a saddle, and the lower island's top is a summit whose prominence is its height above that meeting point.</li>\
+<li><b>Landforms.</b> The topographic position index of Weiss at 300 m and 2 km, each scaled by its own spread, with slope, gives ten classes.</li>\
+<li><b>Wind shelter.</b> Winstral's upwind slope: the steepest angle to the ground within 300 m, looking into the prevailing wind of the weather record across a 30 degree fan.</li>\
+<li><b>The 3D view</b> raises a mesh from the same elevation grid in your browser with the three.js library and drapes the maps over it. What you see standing on a point is drawn from 30 m data and bare ground.</li>\
 <li><b>Lettering and line work</b> are composed as SVG and rasterised by the resvg library, so the maps need no browser and no mapping software to build.</li></ul>");
         b.push_str("<h2>What is not known</h2><p>The research for this guide could not settle the following. Treat each as an open question and ask locally.</p><ul>\
 <li>Whether the conservation area named in the Upper Smoky Sub-regional Plan has been legally created, and where off-highway vehicles will be allowed within it.</li>\
@@ -985,7 +1263,12 @@ pub fn build(world: &World, p: &Products, clim: &Climate, fc: &Forecast, out: &P
     // Offline support.
     let mut core: Vec<String> = vec!["./".into()];
     core.extend(pages.iter().map(|p| p.0.clone()));
-    for f in ["assets/style.css", "assets/app.js", "assets/viewer.js", "assets/explore.js", "assets/icon.svg", "assets/icon-180.png", "vendor/leaflet/leaflet.js", "vendor/leaflet/leaflet.css", "maps.json", "offline.json", "data/cawridge.geojson", "data/elev_ridge.png", "maps/hero.jpg", "manifest.webmanifest"] {
+    for f in [
+        "assets/style.css", "assets/app.js", "assets/viewer.js", "assets/explore.js", "assets/terrain-data.js", "assets/terrain3d.js", "assets/icon.svg", "assets/icon-180.png",
+        "vendor/leaflet/leaflet.js", "vendor/leaflet/leaflet.css", "vendor/three/three.module.min.js", "vendor/three/three.core.min.js", "vendor/three/OrbitControls.js",
+        "maps.json", "offline.json", "data/cawridge.geojson", "data/terrain/terrain.json", "data/terrain/elev_ridge.png", "data/terrain/elev_close.png",
+        "data/terrain/a.png", "data/terrain/b.png", "data/terrain/c.png", "data/terrain/d.png", "maps/hero.jpg", "manifest.webmanifest",
+    ] {
         core.push(f.into());
     }
     for e in std::fs::read_dir(out.join("assets/fonts"))? {

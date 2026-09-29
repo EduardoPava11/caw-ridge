@@ -24,4 +24,4 @@ The licence above covers the program in src/ and the site scripts and styles
 in assets/site/. The data and the maps drawn from it carry the licences of
 their sources, listed in docs/sources.html. The fonts in assets/fonts and
 assets/webfonts are under the SIL Open Font Licence. Leaflet in assets/vendor
-is under the BSD 2-Clause licence.
+is under the BSD 2-Clause licence, and three.js beside it under the MIT licence.

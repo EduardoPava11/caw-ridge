@@ -16,6 +16,8 @@ pub struct Place {
     pub lat: f64,
     pub elev: f32,
     pub note: String,
+    /// A few characters for a label where there is no room for the name.
+    pub short: String,
 }
 
 pub fn gpx(places: &[Place], p: &Products) -> String {
